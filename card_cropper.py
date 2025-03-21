@@ -200,13 +200,31 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.imwrite(str(output_path), warped)
     return True
 
-def process_zip_file(zip_path, border_size=5):
+def process_zip_file(zip_path, border_size=5, clean_input=True, additional_params=None):
+    """
+    Process a zip file containing images.
+    
+    Args:
+        zip_path: Path to the zip file
+        border_size: Size of border to add around detected cards
+        clean_input: Whether to clean the input directory before extraction
+        additional_params: Dictionary of additional parameters to adjust processing
+    """
     # Get the base name of the zip file without extension
     zip_name = os.path.splitext(os.path.basename(zip_path))[0]
     
     # Create input and output directories if they don't exist
     input_dir = Path("input")
     output_dir = Path("output") / zip_name
+    
+    # Clean input directory if requested
+    if clean_input and input_dir.exists():
+        print(f"Cleaning input directory {input_dir}...")
+        for item in input_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
     
     input_dir.mkdir(exist_ok=True)
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -248,13 +266,19 @@ def process_zip_file(zip_path, border_size=5):
                 dest_path = os.path.join(output_dir, file)
                 print(f"Processing image {current_image}/{total_images}: {file}")
                 
-                if crop_largest_object(file_path, dest_path, border_size):
+                # Apply any additional processing parameters
+                border = border_size
+                if additional_params and file in additional_params:
+                    if 'border' in additional_params[file]:
+                        border = additional_params[file]['border']
+                
+                if crop_largest_object(file_path, dest_path, border):
                     processed_count += 1
                 else:
                     skipped_count += 1
                 
                 # Print progress update every 10 images
-                if current_image % 10 == 0:
+                if current_image % 10 == 0 or current_image == total_images:
                     elapsed_time = time.time() - start_time
                     images_per_second = current_image / elapsed_time if elapsed_time > 0 else 0
                     print(f"Progress: {current_image}/{total_images} images ({images_per_second:.2f} images/second)")
@@ -266,14 +290,19 @@ def process_zip_file(zip_path, border_size=5):
     print(f"Successfully cropped {processed_count} images with {border_size}px border to {output_dir}")
     if skipped_count > 0:
         print(f"Skipped {skipped_count} images (could not detect card)")
+    
+    return processed_count, skipped_count
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')
     parser.add_argument('zip_path', help='Path to the zip file')
     parser.add_argument('--border', type=int, default=5, help='Size of border (in pixels) to add around detected cards. Default is 5.')
+    parser.add_argument('--clean', action='store_true', default=True, help='Clean input directory before extraction (default: True)')
+    parser.add_argument('--no-clean', dest='clean', action='store_false', help='Do not clean input directory before extraction')
+    
     args = parser.parse_args()
     
-    process_zip_file(args.zip_path, args.border)
+    process_zip_file(args.zip_path, args.border, args.clean)
 
 if __name__ == "__main__":
-    main()
+    main() 

@@ -471,21 +471,20 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                 
                 print(f"Processing image {processed_count + 1}/{total_images}: {file}")
                 
-                # Check if image is solid color first
-                if is_solid_color_image(input_path):
-                    print(f"Automatically categorizing {file} as 'No image' (solid color detected)")
-                    error_path = errors_no_image_dir / file
-                    # Ensure parent directory exists
-                    os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                    user_rejected_images["no_image"].append(file)
-                    shutil.copy2(input_path, error_path)
-                    processed_count += 1
-                    continue
-                
                 # Process the image
                 success, error_reason = crop_largest_object(input_path, final_path, border_size)
                 if success:
                     processed_count += 1
+                    
+                    # Check if the output image is a solid color (failed cropping)
+                    if is_solid_color_image(final_path):
+                        print(f"Automatically categorizing {file} as 'No image' (cropped image is solid color)")
+                        error_path = errors_no_image_dir / file
+                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                        user_rejected_images["no_image"].append(file)
+                        shutil.move(str(final_path), str(error_path))
+                        error_count += 1
+                        continue
                     
                     # Display the image and ask for verification
                     print(f"\nVerifying image: {file}")
@@ -529,6 +528,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                         os.makedirs(os.path.dirname(error_path), exist_ok=True)
                         user_rejected_images["no_image"].append(file)
                         shutil.copy2(input_path, error_path)
+                        error_count += 1
                     else:
                         # Other processing errors
                         error_images.append((file, error_reason or "Unknown error"))
@@ -536,6 +536,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                         if Path(input_path).is_file():
                             error_path = errors_processing_dir / file
                             shutil.copy(str(input_path), str(error_path))
+                        error_count += 1
                 
                 # Update progress
                 if processed_count % 5 == 0:  # Update every 5 images

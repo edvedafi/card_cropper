@@ -185,6 +185,13 @@ def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=1
         # If the image is too small to check effectively
         if height < 50 or width < 50:
             return False
+        
+        # Check if this looks like a sports/baseball card with visible borders
+        # Sports cards typically have well-defined borders and designs
+        is_likely_sports_card = detect_sports_card(img)
+        if is_likely_sports_card:
+            print("Detected likely sports card with visible border - will not mark as cut off")
+            return False
             
         # Create a binary mask to isolate the card from background
         # Convert to grayscale
@@ -238,20 +245,96 @@ def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=1
             print(f"Border coverage - Top: {top_percent:.2f}, Bottom: {bottom_percent:.2f}, Left: {left_percent:.2f}, Right: {right_percent:.2f}")
             
             # If any border has significant card pixels, it might be cut off
-            cut_off_threshold = 0.05  # 5% of border covered by card pixels
+            # Increased threshold to better differentiate between cut-off and skewed
+            cut_off_threshold = 0.15  # Increased from 0.05 to 0.15 (15% of border covered by card pixels)
             if (top_percent > cut_off_threshold or 
                 bottom_percent > cut_off_threshold or 
                 left_percent > cut_off_threshold or 
                 right_percent > cut_off_threshold):
                 cut_off_votes += 1
         
-        # Consider card cut off if majority of methods agree
-        cut_off_decision = cut_off_votes > (total_methods / 2)
+        # Consider card cut off if most methods agree (changed from majority to 75%)
+        cut_off_decision = cut_off_votes > (total_methods * 0.75)
         print(f"Cut-off detection result: {cut_off_votes}/{total_methods} methods indicate cut-off")
         return cut_off_decision
         
     except Exception as e:
         print(f"Error checking if card is cut off: {e}")
+        return False
+
+def detect_sports_card(image):
+    """
+    Detect if an image looks like a sports card with visible borders
+    Sports cards typically have well-defined borders, text, and consistent color patterns
+    
+    Args:
+        image: The image to analyze
+        
+    Returns:
+        bool: True if the image has characteristics of a sports card, False otherwise
+    """
+    try:
+        # 1. Check for horizontal lines (common in sports cards)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
+        
+        horizontal_lines = 0
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+                # Horizontal lines will have angles close to 0 or 180 degrees
+                if angle < 20 or angle > 160:
+                    horizontal_lines += 1
+        
+        # 2. Check for text (common in sports cards)
+        # Simple check for potential text areas using gradient information
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        sobel_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        
+        # Normalize and threshold
+        sobel_normalized = cv2.normalize(sobel_magnitude, None, 0, 255, cv2.NORM_MINMAX)
+        _, sobel_thresh = cv2.threshold(sobel_normalized.astype(np.uint8), 50, 255, cv2.THRESH_BINARY)
+        
+        # Count potential text pixels
+        text_pixels = cv2.countNonZero(sobel_thresh)
+        text_percentage = text_pixels / (gray.shape[0] * gray.shape[1])
+        
+        # 3. Check for defined borders/rectangles
+        # A sports card typically has a rectangular border
+        # Use contour detection to find rectangles
+        contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        rectangular_contours = 0
+        for contour in contours:
+            # Approximate the contour
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
+            
+            # If the contour has 4 points, it might be a rectangle
+            if len(approx) == 4:
+                rectangular_contours += 1
+        
+        # Sports card criteria
+        has_horizontal_lines = horizontal_lines >= 3
+        has_text = text_percentage > 0.05  # At least 5% of the image should be potential text
+        has_rectangular_elements = rectangular_contours >= 2
+        
+        # Debug output
+        print(f"Sports card detection - Horizontal lines: {horizontal_lines}, Text percentage: {text_percentage:.2f}, Rectangular elements: {rectangular_contours}")
+        
+        # If it meets at least 2 of the 3 criteria, it's likely a sports card
+        is_sports_card = sum([has_horizontal_lines, has_text, has_rectangular_elements]) >= 2
+        
+        if is_sports_card:
+            print("Detected potential sports card with border")
+        
+        return is_sports_card
+        
+    except Exception as e:
+        print(f"Error in sports card detection: {e}")
         return False
 
 def open_directory(directory_path):
@@ -749,16 +832,44 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')
-    parser.add_argument('zip_path', help='Path to the zip file')
+    parser.add_argument('file_path', help='Path to the zip file or individual image')
     parser.add_argument('--border', type=int, default=5, help='Size of border (in pixels) to add around detected cards. Default is 5.')
     parser.add_argument('--clean', action='store_true', default=True, help='Clean input directory before extraction (default: True)')
     parser.add_argument('--no-clean', dest='clean', action='store_false', help='Do not clean input directory before extraction')
     parser.add_argument('--open-errors', action='store_true', default=False, help='Open errors directory after processing (default: False)')
     parser.add_argument('--no-open-errors', dest='open_errors', action='store_false', help='Do not open errors directory after processing')
+    parser.add_argument('--single-image', action='store_true', help='Process a single image file instead of a zip')
     
     args = parser.parse_args()
     
-    process_zip_file(args.zip_path, args.border, args.clean, args.open_errors)
+    # Check if input is a single image
+    if args.single_image or args.file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')):
+        print(f"Processing single image: {args.file_path}")
+        
+        # Create output directories
+        final_dir = Path("output") / "final" / "single"
+        debug_dir = Path("output") / "debug" / "single"
+        final_dir.mkdir(exist_ok=True, parents=True)
+        debug_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Process the image
+        output_path = final_dir / os.path.basename(args.file_path)
+        success, error_reason = crop_largest_object(args.file_path, output_path, args.border)
+        
+        if success:
+            print(f"Successfully processed {args.file_path}")
+            print(f"Output saved to {output_path}")
+            
+            # Display the image for verification
+            is_correct, error_category = display_image(output_path)
+            
+            if not is_correct:
+                print(f"Image verification failed: {error_category}")
+        else:
+            print(f"Failed to process {args.file_path}: {error_reason}")
+    else:
+        # Process as zip file
+        process_zip_file(args.file_path, args.border, args.clean, args.open_errors)
 
 if __name__ == "__main__":
     main() 

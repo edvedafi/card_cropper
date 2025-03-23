@@ -7,6 +7,56 @@ import numpy as np
 import imutils
 from pathlib import Path
 import time
+import subprocess
+import sys
+from term_image.image import from_file
+
+def display_image(image_path):
+    """
+    Display an image in the terminal using term-image library.
+    Returns True if the user confirms the image is correct, False otherwise.
+    """
+    try:
+        # Get image info with OpenCV
+        cv_image = cv2.imread(str(image_path))
+        if cv_image is None:
+            print(f"Error: Could not read image {image_path}")
+            return False
+            
+        # Display image dimensions
+        print(f"\nImage: {os.path.basename(image_path)}")
+        print(f"Dimensions: {cv_image.shape[1]}x{cv_image.shape[0]}")
+        
+        # Use term-image to display the image
+        try:
+            # Load and render the image
+            term_img = from_file(str(image_path))
+            
+            # Set the size to fit in terminal - fixed for Size issue
+            term_img.set_size(height=24)  # Fixed height instead of width to avoid Size error
+            
+            # Display the image
+            print(term_img)
+        except Exception as e:
+            print(f"Could not display image with term-image: {e}")
+            print("Opening with system viewer instead...")
+            if sys.platform == 'darwin':
+                subprocess.run(['open', str(image_path)], check=True)
+            elif sys.platform.startswith('linux'):
+                subprocess.run(['xdg-open', str(image_path)], check=True)
+            elif sys.platform == 'win32':
+                subprocess.run(['start', str(image_path)], check=True)
+            
+        # Get user verification
+        while True:
+            response = input("\nIs this image correct? (y/n): ").lower()
+            if response in ['y', 'n']:
+                return response == 'y'
+            print("Please enter 'y' for yes or 'n' for no.")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
 
 def crop_largest_object(image_path, output_path, border_size=5):
     """
@@ -220,6 +270,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     input_dir = Path("input")
     final_dir = Path("output") / "final" / zip_name
     debug_dir = Path("output") / "debug" / zip_name
+    errors_dir = Path("output") / "errors" / zip_name
     
     # Clean input directory if requested
     if clean_input and input_dir.exists():
@@ -233,6 +284,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     input_dir.mkdir(exist_ok=True)
     final_dir.mkdir(exist_ok=True, parents=True)
     debug_dir.mkdir(exist_ok=True, parents=True)
+    errors_dir.mkdir(exist_ok=True, parents=True)
     
     print(f"Processing {zip_path}...")
     print(f"Extracting to {input_dir}")
@@ -247,6 +299,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     # Process image files
     processed_count = 0
     skipped_count = 0
+    error_count = 0
     
     start_time = time.time()
     total_images = 0
@@ -272,6 +325,17 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
                 # Process the image
                 if crop_largest_object(input_path, final_path, border_size):
                     processed_count += 1
+                    
+                    # Display the image and ask for verification
+                    print(f"\nVerifying image: {file}")
+                    if not display_image(final_path):
+                        # Move to errors directory if incorrect
+                        error_path = errors_dir / file
+                        shutil.move(str(final_path), str(error_path))
+                        print(f"Moved incorrect image to: {error_path}")
+                        error_count += 1
+                    else:
+                        print("Image verified as correct.")
                 else:
                     skipped_count += 1
                 
@@ -287,8 +351,11 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     print(f"Time taken: {elapsed:.2f} seconds")
     print(f"Successfully cropped {processed_count} images with {border_size}px border to {final_dir}")
     print(f"Debug images saved to {debug_dir}")
+    print(f"Error images moved to {errors_dir}")
     if skipped_count > 0:
         print(f"Skipped {skipped_count} images")
+    if error_count > 0:
+        print(f"{error_count} images moved to errors directory")
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')

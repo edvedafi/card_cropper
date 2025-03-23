@@ -378,7 +378,7 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.imwrite(str(output_path), warped)
     return True, None
 
-def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, additional_params=None):
+def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, auto_categorize=False, additional_params=None):
     """
     Process a zip file containing images.
     
@@ -387,6 +387,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
         border_size: Size of border to add around detected cards
         clean_input: Whether to clean the input directory before extraction
         open_errors_dir: Whether to open the errors directory after processing (always False now)
+        auto_categorize: Whether to automatically categorize obvious no_image cases without prompting
         additional_params: Dictionary of additional parameters to adjust processing
     """
     # Get the base name of the zip file without extension
@@ -479,6 +480,16 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                     # Check if the output image is a solid color (failed cropping)
                     is_solid = is_solid_color_image(final_path)
                     
+                    # Auto-categorize solid color output images if enabled
+                    if auto_categorize and is_solid:
+                        print(f"Automatically categorizing {file} as 'No image' (cropped image is solid color)")
+                        error_path = errors_no_image_dir / file
+                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                        user_rejected_images["no_image"].append(file)
+                        shutil.move(str(final_path), str(error_path))
+                        error_count += 1
+                        continue
+                    
                     # Display the image and ask for verification
                     print(f"\nVerifying image: {file}")
                     if is_solid:
@@ -516,6 +527,16 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                         print("Image verified as correct.")
                 else:
                     processed_count += 1
+                    
+                    # Auto-categorize contour detection failures if enabled
+                    if auto_categorize and error_reason and "No suitable contours found" in error_reason:
+                        print(f"Automatically categorizing {file} as 'No image' (no card detected)")
+                        error_path = errors_no_image_dir / file
+                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                        user_rejected_images["no_image"].append(file)
+                        shutil.copy2(input_path, error_path)
+                        error_count += 1
+                        continue
                     
                     # For failed contour detection, copy the original to final path for verification
                     shutil.copy2(input_path, final_path)
@@ -634,10 +655,11 @@ def main():
     parser.add_argument('--no-clean', dest='clean', action='store_false', help='Do not clean input directory before extraction')
     parser.add_argument('--open-errors', action='store_true', default=False, help='Open errors directory after processing (default: False)')
     parser.add_argument('--no-open-errors', dest='open_errors', action='store_false', help='Do not open errors directory after processing')
+    parser.add_argument('--auto-categorize', action='store_true', default=False, help='Automatically categorize solid color images and failed detections as "no_image" without prompting (default: False)')
     
     args = parser.parse_args()
     
-    process_zip_file(args.zip_path, args.border, args.clean, args.open_errors)
+    process_zip_file(args.zip_path, args.border, args.clean, args.open_errors, args.auto_categorize)
 
 if __name__ == "__main__":
     main() 

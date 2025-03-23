@@ -477,17 +477,13 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                     processed_count += 1
                     
                     # Check if the output image is a solid color (failed cropping)
-                    if is_solid_color_image(final_path):
-                        print(f"Automatically categorizing {file} as 'No image' (cropped image is solid color)")
-                        error_path = errors_no_image_dir / file
-                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                        user_rejected_images["no_image"].append(file)
-                        shutil.move(str(final_path), str(error_path))
-                        error_count += 1
-                        continue
+                    is_solid = is_solid_color_image(final_path)
                     
                     # Display the image and ask for verification
                     print(f"\nVerifying image: {file}")
+                    if is_solid:
+                        print("NOTE: The cropped image appears to be a solid color - likely a cropping failure.")
+                    
                     is_correct, error_category = display_image(final_path)
                     
                     if not is_correct:
@@ -521,22 +517,53 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                 else:
                     processed_count += 1
                     
-                    # Automatically categorize images with no contours as "no_image"
+                    # For failed contour detection, copy the original to final path for verification
+                    shutil.copy2(input_path, final_path)
+                    
+                    # Provide helpful message about contour detection failure
                     if error_reason and "No suitable contours found" in error_reason:
-                        print(f"Automatically categorizing {file} as 'No image' (no card detected)")
-                        error_path = errors_no_image_dir / file
+                        print("\nNOTE: No card contour was detected in this image.")
+                    else:
+                        print(f"\nNOTE: Processing error: {error_reason}")
+                    
+                    # Still ask for user verification
+                    print(f"\nVerifying image: {file}")
+                    is_correct, error_category = display_image(final_path)
+                    
+                    if not is_correct:
+                        # Move to appropriate error directory based on the category
+                        if error_category == "no_image":
+                            error_path = errors_no_image_dir / file
+                            error_dir_name = "no_image"
+                            user_rejected_images["no_image"].append(file)
+                        elif error_category == "cut_off":
+                            error_path = errors_cut_off_dir / file
+                            error_dir_name = "cut_off"
+                            user_rejected_images["cut_off"].append(file)
+                        elif error_category == "skewed":
+                            error_path = errors_skewed_dir / file
+                            error_dir_name = "skewed"
+                            user_rejected_images["skewed"].append(file)
+                        elif error_category == "other":
+                            error_path = errors_other_dir / file
+                            error_dir_name = "other"
+                            user_rejected_images["other"].append(file)
+                        else:
+                            # Fallback if category is not recognized
+                            error_path = errors_base_dir / file
+                            error_dir_name = "unspecified"
+                        
+                        # Copy input image to error directory
                         os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                        user_rejected_images["no_image"].append(file)
                         shutil.copy2(input_path, error_path)
+                        print(f"Image categorized as '{error_dir_name}', saved to {error_path}")
+                        # Remove from final directory
+                        if final_path.exists():
+                            os.remove(final_path)
                         error_count += 1
                     else:
-                        # Other processing errors
-                        error_images.append((file, error_reason or "Unknown error"))
-                        # Move processing errors to their own directory
-                        if Path(input_path).is_file():
-                            error_path = errors_processing_dir / file
-                            shutil.copy(str(input_path), str(error_path))
-                        error_count += 1
+                        print("Image verified as correct despite processing issues.")
+                        # The image is already in the final directory
                 
                 # Update progress
                 if processed_count % 5 == 0:  # Update every 5 images

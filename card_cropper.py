@@ -103,7 +103,10 @@ def crop_largest_object(image_path, output_path, border_size=5):
     # Draw the contour on a debug image
     debug_image = orig.copy()
     cv2.drawContours(debug_image, [best_contour], -1, (0, 255, 0), 2)
-    debug_path = str(output_path).replace('.jpg', '_debug.jpg').replace('.jpeg', '_debug.jpeg').replace('.png', '_debug.png')
+    
+    # Save debug image to the debug directory
+    debug_path = str(output_path).replace('/final/', '/debug/')
+    debug_path = debug_path.replace('.jpg', '_debug.jpg').replace('.jpeg', '_debug.jpeg').replace('.png', '_debug.png')
     cv2.imwrite(debug_path, debug_image)
     
     # Approximate the contour
@@ -215,7 +218,8 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     
     # Create input and output directories if they don't exist
     input_dir = Path("input")
-    output_dir = Path("output") / zip_name
+    final_dir = Path("output") / "final" / zip_name
+    debug_dir = Path("output") / "debug" / zip_name
     
     # Clean input directory if requested
     if clean_input and input_dir.exists():
@@ -227,7 +231,8 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
                 shutil.rmtree(item)
     
     input_dir.mkdir(exist_ok=True)
-    output_dir.mkdir(exist_ok=True, parents=True)
+    final_dir.mkdir(exist_ok=True, parents=True)
+    debug_dir.mkdir(exist_ok=True, parents=True)
     
     print(f"Processing {zip_path}...")
     print(f"Extracting to {input_dir}")
@@ -249,49 +254,41 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     # First, count total images
     for root, _, files in os.walk(input_dir):
         for file in files:
-            _, ext = os.path.splitext(file)
-            if ext.lower() in image_extensions:
+            if any(file.lower().endswith(ext) for ext in image_extensions):
                 total_images += 1
     
-    current_image = 0
+    print(f"Found {total_images} images in the zip file")
     
-    # Process images
+    # Process each image
     for root, _, files in os.walk(input_dir):
         for file in files:
-            file_path = os.path.join(root, file)
-            _, ext = os.path.splitext(file_path)
-            
-            if ext.lower() in image_extensions:
-                current_image += 1
-                dest_path = os.path.join(output_dir, file)
-                print(f"Processing image {current_image}/{total_images}: {file}")
+            if any(file.lower().endswith(ext) for ext in image_extensions):
+                input_path = os.path.join(root, file)
+                final_path = final_dir / file
+                debug_path = debug_dir / file
                 
-                # Apply any additional processing parameters
-                border = border_size
-                if additional_params and file in additional_params:
-                    if 'border' in additional_params[file]:
-                        border = additional_params[file]['border']
+                print(f"Processing image {processed_count + 1}/{total_images}: {file}")
                 
-                if crop_largest_object(file_path, dest_path, border):
+                # Process the image
+                if crop_largest_object(input_path, final_path, border_size):
                     processed_count += 1
                 else:
                     skipped_count += 1
                 
-                # Print progress update every 10 images
-                if current_image % 10 == 0 or current_image == total_images:
-                    elapsed_time = time.time() - start_time
-                    images_per_second = current_image / elapsed_time if elapsed_time > 0 else 0
-                    print(f"Progress: {current_image}/{total_images} images ({images_per_second:.2f} images/second)")
+                # Update progress
+                if processed_count % 10 == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed_count / elapsed
+                    print(f"Progress: {processed_count}/{total_images} images ({rate:.2f} images/second)")
     
-    # Print final stats
-    elapsed_time = time.time() - start_time
+    # Print summary
+    elapsed = time.time() - start_time
     print(f"\nProcessing complete!")
-    print(f"Time taken: {elapsed_time:.2f} seconds")
-    print(f"Successfully cropped {processed_count} images with {border_size}px border to {output_dir}")
+    print(f"Time taken: {elapsed:.2f} seconds")
+    print(f"Successfully cropped {processed_count} images with {border_size}px border to {final_dir}")
+    print(f"Debug images saved to {debug_dir}")
     if skipped_count > 0:
-        print(f"Skipped {skipped_count} images (could not detect card)")
-    
-    return processed_count, skipped_count
+        print(f"Skipped {skipped_count} images")
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')

@@ -324,6 +324,49 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.imwrite(str(output_path), warped)
     return True, None
 
+def is_solid_color_image(image_path, threshold=10):
+    """
+    Detect if an image is a solid color (or very close to it).
+    
+    Args:
+        image_path: Path to the image file
+        threshold: Color variance threshold
+        
+    Returns:
+        bool: True if the image is a solid color, False otherwise
+    """
+    try:
+        # Read the image
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return True  # Can't read image, consider it a solid color
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Check if the image is very small
+        if img.shape[0] < 20 or img.shape[1] < 20:
+            return True
+            
+        # Calculate standard deviation of pixel values
+        # If standard deviation is very low, it's likely a solid color
+        std_dev = np.std(gray)
+        
+        # Check histogram distribution
+        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+        hist_max = np.max(hist)
+        hist_sum = np.sum(hist)
+        
+        # If most pixels are in a single bin, it's likely a solid color
+        if hist_max / hist_sum > 0.9:  # 90% of pixels in one intensity value
+            return True
+            
+        return std_dev < threshold
+        
+    except Exception as e:
+        print(f"Error checking if image is solid color: {e}")
+        return False  # Default to False on error
+
 def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, additional_params=None):
     """
     Process a zip file containing images.
@@ -351,16 +394,8 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     errors_other_dir = errors_base_dir / "other"
     errors_processing_dir = errors_base_dir / "processing"
     
-    # Clean input directory if requested
-    if clean_input and input_dir.exists():
-        print(f"Cleaning input directory {input_dir}...")
-        for item in input_dir.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
-    
-    input_dir.mkdir(exist_ok=True)
+    # Create input and output directories if they don't exist
+    input_dir.mkdir(exist_ok=True, parents=True)
     final_dir.mkdir(exist_ok=True, parents=True)
     debug_dir.mkdir(exist_ok=True, parents=True)
     
@@ -372,156 +407,191 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     errors_other_dir.mkdir(exist_ok=True, parents=True)
     errors_processing_dir.mkdir(exist_ok=True, parents=True)
     
+    # Clean input directory if requested
+    if clean_input:
+        print(f"Cleaning input directory {input_dir}...")
+        for item in input_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+    
+    # Extract zip file
     print(f"Processing {zip_path}...")
     print(f"Extracting to {input_dir}")
-    
-    # Extract zip contents to input directory
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(input_dir)
-    
-    # Define common image extensions
-    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
-    
-    # Process image files
-    processed_count = 0
-    skipped_count = 0
-    error_count = 0
-    
-    # Track error images with reasons
-    error_images = []  # List to store tuples of (filename, reason)
-    user_rejected_images = {
-        "no_image": [],
-        "cut_off": [],
-        "skewed": [],
-        "other": []
-    }
-    
     start_time = time.time()
-    total_images = 0
     
-    # First, count total images
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            if any(file.lower().endswith(ext) for ext in image_extensions):
-                total_images += 1
-    
-    print(f"Found {total_images} images in the zip file")
-    
-    # Process each image
-    for root, _, files in os.walk(input_dir):
-        for file in files:
-            if any(file.lower().endswith(ext) for ext in image_extensions):
-                input_path = os.path.join(root, file)
-                final_path = final_dir / file
-                debug_path = debug_dir / file
-                
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(input_dir)
+            
+        # Get all image files in the input directory
+        image_files = []
+        image_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+        for root, _, files in os.walk(input_dir):
+            for file in files:
+                if file.lower().endswith(image_extensions):
+                    relative_path = os.path.relpath(os.path.join(root, file), input_dir)
+                    image_files.append(relative_path)
+                    
+        total_images = len(image_files)
+        print(f"Found {total_images} images in the zip file")
+        
+        # Track counts and errors
+        processed_count = 0
+        successful_count = 0
+        skipped_count = 0
+        
+        # Track error images with reasons
+        error_images = []  # List to store tuples of (filename, reason)
+        user_rejected_images = {
+            "no_image": [],
+            "cut_off": [],
+            "skewed": [],
+            "other": []
+        }
+        
+        # Process each image
+        for file in image_files:
+            # Convert string path to Path object
+            file_path = Path(file)
+            input_path = input_dir / file_path
+            final_path = final_dir / file_path
+            
+            if input_path.is_file():
                 print(f"Processing image {processed_count + 1}/{total_images}: {file}")
                 
-                # Process the image
-                success, error_reason = crop_largest_object(input_path, final_path, border_size)
-                if success:
-                    processed_count += 1
+                # Create parent directories for output files if they don't exist
+                final_path.parent.mkdir(exist_ok=True, parents=True)
+                
+                try:
+                    # Check if image is solid color first
+                    if is_solid_color_image(input_path):
+                        print(f"Automatically categorizing {file} as 'No image' (solid color detected)")
+                        error_path = errors_no_image_dir / file_path
+                        error_path.parent.mkdir(exist_ok=True, parents=True)
+                        user_rejected_images["no_image"].append(str(file))
+                        shutil.copy2(input_path, error_path)
+                        processed_count += 1
+                        continue
                     
-                    # Display the image and ask for verification
-                    print(f"\nVerifying image: {file}")
-                    is_correct, error_category = display_image(final_path)
+                    # Process the image
+                    success, error_reason = crop_largest_object(input_path, final_path, border_size)
                     
-                    if not is_correct:
-                        # Move to appropriate error directory based on the category
-                        if error_category == "no_image":
-                            error_path = errors_no_image_dir / file
-                            error_dir_name = "no_image"
-                            user_rejected_images["no_image"].append(file)
-                        elif error_category == "cut_off":
-                            error_path = errors_cut_off_dir / file
-                            error_dir_name = "cut_off"
-                            user_rejected_images["cut_off"].append(file)
-                        elif error_category == "skewed":
-                            error_path = errors_skewed_dir / file
-                            error_dir_name = "skewed"
-                            user_rejected_images["skewed"].append(file)
-                        elif error_category == "other":
-                            error_path = errors_other_dir / file
-                            error_dir_name = "other"
-                            user_rejected_images["other"].append(file)
+                    if success:
+                        processed_count += 1
+                        
+                        # Show the cropped image and get user verification
+                        is_correct, error_category = display_image(final_path)
+                        
+                        if is_correct:
+                            successful_count += 1
                         else:
-                            # Fallback if category is not recognized
-                            error_path = errors_base_dir / file
-                            error_dir_name = "unspecified"
+                            # Move to appropriate error directory based on the category
+                            if error_category == "no_image":
+                                error_path = errors_no_image_dir / file_path
+                                error_dir_name = "no_image"
+                                user_rejected_images["no_image"].append(str(file))
+                            elif error_category == "cut_off":
+                                error_path = errors_cut_off_dir / file_path
+                                error_dir_name = "cut_off"
+                                user_rejected_images["cut_off"].append(str(file))
+                            elif error_category == "skewed":
+                                error_path = errors_skewed_dir / file_path
+                                error_dir_name = "skewed"
+                                user_rejected_images["skewed"].append(str(file))
+                            elif error_category == "other":
+                                error_path = errors_other_dir / file_path
+                                error_dir_name = "other"
+                                user_rejected_images["other"].append(str(file))
+                            else:
+                                # Fallback if category is not recognized
+                                error_path = errors_base_dir / file_path
+                                error_dir_name = "unspecified"
+                                
+                            # Move input image to appropriate error category
+                            os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                            shutil.copy2(input_path, error_path)
+                            print(f"Image rejected as '{error_dir_name}', saved to {error_path}")
                             
-                        shutil.move(str(final_path), str(error_path))
-                        print(f"Moved incorrect image to: {error_path}")
-                        error_count += 1
+                            # Remove the file from final directory
+                            if final_path.exists():
+                                os.remove(final_path)
                     else:
-                        print("Image verified as correct.")
-                else:
-                    skipped_count += 1
-                    error_images.append((file, error_reason or "Unknown error"))
-                    # Move processing errors to their own directory
-                    if Path(input_path).is_file():
-                        error_path = errors_processing_dir / file
-                        shutil.copy(str(input_path), str(error_path))
-                
-                # Update progress
-                if processed_count % 5 == 0:  # Update every 5 images
-                    elapsed = time.time() - start_time
-                    rate = processed_count / elapsed if elapsed > 0 else 0
-                    print(f"Progress: {processed_count}/{total_images} images ({rate:.2f} images/second)")
-    
-    # Count errors by category
-    no_image_count = len(user_rejected_images["no_image"])
-    cut_off_count = len(user_rejected_images["cut_off"])
-    skewed_count = len(user_rejected_images["skewed"])
-    other_count = len(user_rejected_images["other"])
-    processing_error_count = len(error_images)
-    
-    # Print summary
-    elapsed = time.time() - start_time
-    print(f"\nProcessing complete!")
-    print(f"Time taken: {elapsed:.2f} seconds")
-    print(f"Successfully cropped {processed_count - error_count} images with {border_size}px border to {final_dir}")
-    print(f"Debug images saved to {debug_dir}")
-    
-    # Print error summary
-    total_errors = no_image_count + cut_off_count + skewed_count + other_count + processing_error_count
-    if total_errors > 0:
-        print("\n==== Error Summary ====")
+                        processed_count += 1
+                        error_images.append((file, error_reason))
+                        
+                        # Move processing errors to their own directory
+                        if Path(input_path).is_file():
+                            error_path = errors_processing_dir / file_path
+                            os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                            shutil.copy(str(input_path), str(error_path))
+                except Exception as e:
+                    processed_count += 1
+                    error_reason = f"Error processing image: {e}"
+                    error_images.append((file, error_reason))
+                    error_path = errors_processing_dir / file_path
+                    os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                    shutil.copy(str(input_path), str(error_path))
+            else:
+                print(f"Warning: file not found or not a file: {input_path}")
+                skipped_count += 1
         
-        # Report user-rejected images by category
-        if no_image_count > 0:
-            print(f"\nNo image detected ({no_image_count} images):")
-            for idx, filename in enumerate(user_rejected_images["no_image"], 1):
-                print(f"{idx}. {filename}")
-                
-        if cut_off_count > 0:
-            print(f"\nImage cut off ({cut_off_count} images):")
-            for idx, filename in enumerate(user_rejected_images["cut_off"], 1):
-                print(f"{idx}. {filename}")
-                
-        if skewed_count > 0:
-            print(f"\nImage skewed ({skewed_count} images):")
-            for idx, filename in enumerate(user_rejected_images["skewed"], 1):
-                print(f"{idx}. {filename}")
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+        print("\nProcessing complete!")
+        print(f"Time taken: {elapsed_time:.2f} seconds")
+        print(f"Successfully cropped {successful_count} images")
         
-        if other_count > 0:
-            print(f"\nOther issues ({other_count} images):")
-            for idx, filename in enumerate(user_rejected_images["other"], 1):
-                print(f"{idx}. {filename}")
+        # Count errors by category
+        no_image_count = len(user_rejected_images["no_image"])
+        cut_off_count = len(user_rejected_images["cut_off"])
+        skewed_count = len(user_rejected_images["skewed"])
+        other_count = len(user_rejected_images["other"])
+        processing_error_count = len(error_images)
         
-        # Report processing errors
-        if processing_error_count > 0:
-            print(f"\nProcessing errors ({processing_error_count} images):")
-            for idx, (filename, reason) in enumerate(error_images, 1):
-                print(f"{idx}. {filename}: {reason}")
-        
-        # Report total errors
+        # Print error summary
+        total_errors = no_image_count + cut_off_count + skewed_count + other_count + processing_error_count
         if total_errors > 0:
-            error_percentage = (total_errors / processed_count) * 100 if processed_count > 0 else 0
-            print(f"\nTotal error images: {total_errors} ({error_percentage:.1f}% of processed images)")
-            print(f"Error images saved to: {errors_base_dir}")
-    
-    if skipped_count > 0:
-        print(f"Skipped {skipped_count} images")
+            print("\n==== Error Summary ====")
+            
+            # Report user-rejected images by category
+            if no_image_count > 0:
+                print(f"\nNo image detected ({no_image_count} images):")
+                for idx, filename in enumerate(user_rejected_images["no_image"], 1):
+                    print(f"{idx}. {filename}")
+                    
+            if cut_off_count > 0:
+                print(f"\nImage cut off ({cut_off_count} images):")
+                for idx, filename in enumerate(user_rejected_images["cut_off"], 1):
+                    print(f"{idx}. {filename}")
+                    
+            if skewed_count > 0:
+                print(f"\nImage skewed ({skewed_count} images):")
+                for idx, filename in enumerate(user_rejected_images["skewed"], 1):
+                    print(f"{idx}. {filename}")
+                    
+            if other_count > 0:
+                print(f"\nOther issues ({other_count} images):")
+                for idx, filename in enumerate(user_rejected_images["other"], 1):
+                    print(f"{idx}. {filename}")
+            
+            # Report processing errors
+            if processing_error_count > 0:
+                print(f"\nProcessing errors ({processing_error_count} images):")
+                for idx, (filename, reason) in enumerate(error_images, 1):
+                    print(f"{idx}. {filename}: {reason}")
+            
+            # Report total errors
+            if total_errors > 0:
+                error_percentage = (total_errors / processed_count) * 100 if processed_count > 0 else 0
+                print(f"\nTotal error images: {total_errors} ({error_percentage:.1f}% of processed images)")
+                print(f"Error images saved to: {errors_base_dir}")
+        
+        if skipped_count > 0:
+            print(f"Skipped {skipped_count} images")
+    except Exception as e:
+        print(f"Error processing zip file: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')

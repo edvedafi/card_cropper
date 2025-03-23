@@ -162,93 +162,97 @@ def is_solid_color_image(image_path, threshold=50):
 
 def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=10):
     """
-    Detect if a card is cut off by checking if there's a consistent background color border 
-    around the entire cropped image.
+    Detect if a card is cut off by checking if the card extends to the edge of the image.
+    A card is considered cut off if it touches any edge of the cropped image without a border.
     
     Args:
         cropped_image_path: Path to the cropped card image
-        original_image_path: Path to the original image (to identify background color)
-        border_check_size: Number of pixels to check from the edge
+        original_image_path: Path to the original image (for reference)
+        border_check_size: Size of border to check
         
     Returns:
         bool: True if the card appears to be cut off, False otherwise
     """
     try:
-        # Read the images
-        cropped_img = cv2.imread(str(cropped_image_path))
-        original_img = cv2.imread(str(original_image_path))
-        
-        if cropped_img is None or original_img is None:
-            return False  # Can't determine without both images
+        # Read the image
+        img = cv2.imread(str(cropped_image_path))
+        if img is None:
+            return False
             
         # Get image dimensions
-        height, width = cropped_img.shape[:2]
+        height, width = img.shape[:2]
         
-        # If the image is too small to check borders effectively
+        # If the image is too small to check effectively
         if height < 50 or width < 50:
             return False
             
-        # Identify potential background color from the original image corners
-        # Take samples from the four corners and find the most common
-        corner_samples = []
-        corner_size = 20  # Get larger samples from corners to find background
+        # Create a binary mask to isolate the card from background
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Top-left corner
-        corner_samples.extend(original_img[0:corner_size, 0:corner_size].reshape(-1, 3))
-        # Top-right corner
-        corner_samples.extend(original_img[0:corner_size, -corner_size:].reshape(-1, 3))
-        # Bottom-left corner
-        corner_samples.extend(original_img[-corner_size:, 0:corner_size].reshape(-1, 3))
-        # Bottom-right corner
-        corner_samples.extend(original_img[-corner_size:, -corner_size:].reshape(-1, 3))
+        # Try multiple thresholding approaches to find the card
+        card_masks = []
         
-        # Convert to numpy array
-        corner_samples = np.array(corner_samples)
+        # 1. Adaptive thresholding
+        adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                             cv2.THRESH_BINARY_INV, 51, 10)
+        card_masks.append(adaptive_thresh)
         
-        # Use K-means to find the most common color in the corners
-        # This should help find the background color
-        K = 3  # Try to find the top 3 common colors
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        _, labels, centers = cv2.kmeans(np.float32(corner_samples), K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        # 2. Otsu's thresholding
+        _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        card_masks.append(otsu_thresh)
         
-        # Find the most common cluster
-        counts = np.bincount(labels.flatten())
-        most_common_cluster = np.argmax(counts)
-        background_color = centers[most_common_cluster].astype(np.uint8)
+        # 3. Multiple global thresholds
+        for thresh_val in [120, 150, 180, 210]:
+            _, global_thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY_INV)
+            card_masks.append(global_thresh)
         
-        # Check borders of the cropped image
-        top_border = cropped_img[0:border_check_size, :]
-        bottom_border = cropped_img[-border_check_size:, :]
-        left_border = cropped_img[:, 0:border_check_size]
-        right_border = cropped_img[:, -border_check_size:]
+        # 4. Edge detection
+        edges = cv2.Canny(gray, 30, 150)
+        card_masks.append(edges)
         
-        # Calculate color distance from each border pixel to background color
-        def color_distance(pixels, bg_color):
-            return np.sqrt(np.sum((pixels - bg_color) ** 2, axis=-1))
+        # Check each mask for edge touches
+        cut_off_votes = 0
+        total_methods = len(card_masks)
         
-        # Check each border for background color presence
-        thresholds = [30, 50, 70]  # Try different thresholds
-
-        # Start with strictest threshold
-        for threshold in thresholds:
-            # Calculate what percentage of each border is background
-            top_bg = np.mean(color_distance(top_border.reshape(-1, 3), background_color) < threshold)
-            bottom_bg = np.mean(color_distance(bottom_border.reshape(-1, 3), background_color) < threshold)
-            left_bg = np.mean(color_distance(left_border.reshape(-1, 3), background_color) < threshold)
-            right_bg = np.mean(color_distance(right_border.reshape(-1, 3), background_color) < threshold)
+        for mask in card_masks:
+            # Check if there are non-zero pixels in the border region
+            top_border = mask[0:border_check_size, :]
+            bottom_border = mask[height-border_check_size:, :]
+            left_border = mask[:, 0:border_check_size]
+            right_border = mask[:, width-border_check_size:]
             
-            borders_with_bg = sum([top_bg > 0.3, bottom_bg > 0.3, left_bg > 0.3, right_bg > 0.3])
+            # Count non-zero pixels in each border
+            top_pixels = cv2.countNonZero(top_border)
+            bottom_pixels = cv2.countNonZero(bottom_border)
+            left_pixels = cv2.countNonZero(left_border)
+            right_pixels = cv2.countNonZero(right_border)
             
-            # If we have at least one border without background color at the strictest threshold
-            if borders_with_bg < 4:
-                return True
-                
-        # If all borders have background color with all thresholds, card is likely not cut off
-        return False
+            # Calculate percentage of border covered by card
+            top_percent = top_pixels / (top_border.shape[0] * top_border.shape[1])
+            bottom_percent = bottom_pixels / (bottom_border.shape[0] * bottom_border.shape[1])
+            left_percent = left_pixels / (left_border.shape[0] * left_border.shape[1])
+            right_percent = right_pixels / (right_border.shape[0] * right_border.shape[1])
+            
+            # Debug output
+            print(f"Border coverage - Top: {top_percent:.2f}, Bottom: {bottom_percent:.2f}, Left: {left_percent:.2f}, Right: {right_percent:.2f}")
+            
+            # If any border has significant card pixels, it might be cut off
+            cut_off_threshold = 0.05  # 5% of border covered by card pixels
+            if (top_percent > cut_off_threshold or 
+                bottom_percent > cut_off_threshold or 
+                left_percent > cut_off_threshold or 
+                right_percent > cut_off_threshold):
+                cut_off_votes += 1
+        
+        # Consider card cut off if majority of methods agree
+        cut_off_decision = cut_off_votes > (total_methods / 2)
+        print(f"Cut-off detection result: {cut_off_votes}/{total_methods} methods indicate cut-off")
+        return cut_off_decision
         
     except Exception as e:
         print(f"Error checking if card is cut off: {e}")
-        return False  # Default to False on error
+        return False
 
 def open_directory(directory_path):
     """

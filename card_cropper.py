@@ -324,16 +324,16 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.imwrite(str(output_path), warped)
     return True, None
 
-def is_solid_color_image(image_path, threshold=10):
+def is_solid_color_image(image_path, threshold=50):
     """
-    Detect if an image is a solid color (or very close to it).
+    Detect if an image is mostly a solid color (or very close to it).
     
     Args:
         image_path: Path to the image file
-        threshold: Color variance threshold
+        threshold: Color variance threshold (higher = more lenient)
         
     Returns:
-        bool: True if the image is a solid color, False otherwise
+        bool: True if the image is mostly a solid color, False otherwise
     """
     try:
         # Read the image
@@ -347,20 +347,31 @@ def is_solid_color_image(image_path, threshold=10):
         # Check if the image is very small
         if img.shape[0] < 20 or img.shape[1] < 20:
             return True
-            
+        
         # Calculate standard deviation of pixel values
-        # If standard deviation is very low, it's likely a solid color
         std_dev = np.std(gray)
         
-        # Check histogram distribution
+        # Check histogram distribution - more lenient for photos
         hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
         hist_max = np.max(hist)
         hist_sum = np.sum(hist)
         
-        # If most pixels are in a single bin, it's likely a solid color
-        if hist_max / hist_sum > 0.9:  # 90% of pixels in one intensity value
+        # For photos, we'll be more lenient - if most pixels are in a small range
+        # To handle natural variations in lighting and camera sensors
+        if hist_max / hist_sum > 0.6:  # 60% of pixels in one intensity bin
             return True
             
+        # Check if most pixels are concentrated in a small range of the histogram
+        # Calculate how many bins contain 90% of the pixels
+        hist_normalized = hist / hist_sum
+        hist_cumulative = np.cumsum(hist_normalized)
+        bins_90_percent = np.searchsorted(hist_cumulative, 0.9)
+        
+        # If 90% of pixels are in less than 20% of possible bins, likely a near-solid color
+        if bins_90_percent < 51:  # 20% of 256 bins
+            return True
+        
+        # More lenient threshold for photos with lighting variations
         return std_dev < threshold
         
     except Exception as e:
@@ -519,13 +530,22 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                                 os.remove(final_path)
                     else:
                         processed_count += 1
-                        error_images.append((file, error_reason))
-                        
-                        # Move processing errors to their own directory
-                        if Path(input_path).is_file():
-                            error_path = errors_processing_dir / file_path
-                            os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                            shutil.copy(str(input_path), str(error_path))
+                        # If contour detection failed, categorize as "no_image" automatically
+                        if "No suitable contours found" in error_reason:
+                            print(f"Automatically categorizing {file} as 'No image' (no card detected)")
+                            error_path = errors_no_image_dir / file_path
+                            error_path.parent.mkdir(exist_ok=True, parents=True)
+                            user_rejected_images["no_image"].append(str(file))
+                            shutil.copy2(input_path, error_path)
+                        else:
+                            # Other processing errors
+                            error_images.append((file, error_reason))
+                            
+                            # Move processing errors to their own directory
+                            if Path(input_path).is_file():
+                                error_path = errors_processing_dir / file_path
+                                os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                                shutil.copy(str(input_path), str(error_path))
                 except Exception as e:
                     processed_count += 1
                     error_reason = f"Error processing image: {e}"

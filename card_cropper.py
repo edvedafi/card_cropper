@@ -162,105 +162,125 @@ def is_solid_color_image(image_path, threshold=50):
 
 def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=10):
     """
-    Detect if a card is cut off by checking if the card extends to the edge of the image.
-    A card is considered cut off if it touches any edge of the cropped image without a border.
+    Detect if a card is cut off by comparing the cropped image with the original.
+    A properly cropped card should be completely contained within the original image
+    with some background margins.
     
     Args:
         cropped_image_path: Path to the cropped card image
-        original_image_path: Path to the original image (for reference)
+        original_image_path: Path to the original image
         border_check_size: Size of border to check
         
     Returns:
         bool: True if the card appears to be cut off, False otherwise
     """
     try:
-        # Read the image
-        img = cv2.imread(str(cropped_image_path))
-        if img is None:
+        # Read the images
+        cropped_img = cv2.imread(str(cropped_image_path))
+        original_img = cv2.imread(str(original_image_path))
+        
+        if cropped_img is None or original_img is None:
             return False
             
         # Get image dimensions
-        height, width = img.shape[:2]
+        cropped_h, cropped_w = cropped_img.shape[:2]
+        original_h, original_w = original_img.shape[:2]
         
         # If the image is too small to check effectively
-        if height < 50 or width < 50:
+        if cropped_h < 50 or cropped_w < 50:
             return False
         
-        # Check if this looks like a sports/baseball card with visible borders
-        # Sports cards typically have well-defined borders and designs
-        is_likely_sports_card = detect_sports_card(img)
-        if is_likely_sports_card:
-            print("Detected likely sports card with visible border - will not mark as cut off")
-            return False
+        # Instead of template matching, let's use a different approach to detect cut-off cards
+        # We'll analyze the border pixels of the cropped image
+
+        # First check border pixels for consistency
+        # Extract borders
+        top_border = cropped_img[0:border_check_size, :]
+        bottom_border = cropped_img[-border_check_size:, :]
+        left_border = cropped_img[:, 0:border_check_size]
+        right_border = cropped_img[:, -border_check_size:]
+        
+        # Calculate color statistics for each border
+        # A cut-off card would likely have inconsistent borders with the card content extending to the edge
+        
+        def calc_border_stats(border):
+            # Convert to HSV for better color analysis
+            hsv_border = cv2.cvtColor(border, cv2.COLOR_BGR2HSV)
+            # Calculate standard deviation of each channel
+            h_std = np.std(hsv_border[:,:,0])
+            s_std = np.std(hsv_border[:,:,1])
+            v_std = np.std(hsv_border[:,:,2])
+            # Higher std dev means more color variation (inconsistent border)
+            return (h_std, s_std, v_std)
+        
+        top_stats = calc_border_stats(top_border)
+        bottom_stats = calc_border_stats(bottom_border)
+        left_stats = calc_border_stats(left_border)
+        right_stats = calc_border_stats(right_border)
+        
+        # Calculate average std dev across all channels for each border
+        top_std = np.mean(top_stats)
+        bottom_std = np.mean(bottom_stats)
+        left_std = np.mean(left_stats)
+        right_std = np.mean(right_stats)
+        
+        # Print border statistics
+        print(f"Border std dev - Top: {top_std:.2f}, Bottom: {bottom_std:.2f}, Left: {left_std:.2f}, Right: {right_std:.2f}")
+        
+        # Set thresholds for what constitutes a consistent border
+        # Lower std dev means more consistent color (likely background)
+        # Higher std dev means more variation (likely card content reaching the edge)
+        std_threshold = 25.0  # This may need adjustment based on testing
+        
+        # Check if any border has high color variation (suggesting card content at the edge)
+        if (top_std > std_threshold or 
+            bottom_std > std_threshold or 
+            left_std > std_threshold or 
+            right_std > std_threshold):
             
-        # Create a binary mask to isolate the card from background
-        # Convert to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Try multiple thresholding approaches to find the card
-        card_masks = []
-        
-        # 1. Adaptive thresholding
-        adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                             cv2.THRESH_BINARY_INV, 51, 10)
-        card_masks.append(adaptive_thresh)
-        
-        # 2. Otsu's thresholding
-        _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        card_masks.append(otsu_thresh)
-        
-        # 3. Multiple global thresholds
-        for thresh_val in [120, 150, 180, 210]:
-            _, global_thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY_INV)
-            card_masks.append(global_thresh)
-        
-        # 4. Edge detection
-        edges = cv2.Canny(gray, 30, 150)
-        card_masks.append(edges)
-        
-        # Check each mask for edge touches
-        cut_off_votes = 0
-        total_methods = len(card_masks)
-        
-        for mask in card_masks:
-            # Check if there are non-zero pixels in the border region
-            top_border = mask[0:border_check_size, :]
-            bottom_border = mask[height-border_check_size:, :]
-            left_border = mask[:, 0:border_check_size]
-            right_border = mask[:, width-border_check_size:]
+            # Further verify with color continuity check
+            # For a border that seems to have high variation, check if it's similar to the 
+            # adjacent inner pixels (which would suggest content extends to the edge)
             
-            # Count non-zero pixels in each border
-            top_pixels = cv2.countNonZero(top_border)
-            bottom_pixels = cv2.countNonZero(bottom_border)
-            left_pixels = cv2.countNonZero(left_border)
-            right_pixels = cv2.countNonZero(right_border)
+            # Get the adjacent inner pixels for each border
+            inner_top = cropped_img[border_check_size:border_check_size*2, :]
+            inner_bottom = cropped_img[-border_check_size*2:-border_check_size, :]
+            inner_left = cropped_img[:, border_check_size:border_check_size*2]
+            inner_right = cropped_img[:, -border_check_size*2:-border_check_size]
             
-            # Calculate percentage of border covered by card
-            top_percent = top_pixels / (top_border.shape[0] * top_border.shape[1])
-            bottom_percent = bottom_pixels / (bottom_border.shape[0] * bottom_border.shape[1])
-            left_percent = left_pixels / (left_border.shape[0] * left_border.shape[1])
-            right_percent = right_pixels / (right_border.shape[0] * right_border.shape[1])
+            # Compare border to inner pixels (using average color)
+            top_similarity = np.mean(np.abs(np.mean(top_border, axis=(0,1)) - np.mean(inner_top, axis=(0,1))))
+            bottom_similarity = np.mean(np.abs(np.mean(bottom_border, axis=(0,1)) - np.mean(inner_bottom, axis=(0,1))))
+            left_similarity = np.mean(np.abs(np.mean(left_border, axis=(0,1)) - np.mean(inner_left, axis=(0,1))))
+            right_similarity = np.mean(np.abs(np.mean(right_border, axis=(0,1)) - np.mean(inner_right, axis=(0,1))))
             
-            # Debug output
-            print(f"Border coverage - Top: {top_percent:.2f}, Bottom: {bottom_percent:.2f}, Left: {left_percent:.2f}, Right: {right_percent:.2f}")
+            print(f"Border-inner similarity - Top: {top_similarity:.2f}, Bottom: {bottom_similarity:.2f}, Left: {left_similarity:.2f}, Right: {right_similarity:.2f}")
             
-            # If any border has significant card pixels, it might be cut off
-            # Increased threshold to better differentiate between cut-off and skewed
-            cut_off_threshold = 0.15  # Increased from 0.05 to 0.15 (15% of border covered by card pixels)
-            if (top_percent > cut_off_threshold or 
-                bottom_percent > cut_off_threshold or 
-                left_percent > cut_off_threshold or 
-                right_percent > cut_off_threshold):
-                cut_off_votes += 1
+            # If border is similar to adjacent inner pixels in color AND has high std dev,
+            # it likely means card content extends to the edge (cut off)
+            similarity_threshold = 20.0  # Lower value means more similar (adjust as needed)
+            
+            cutoff_borders = []
+            
+            if top_std > std_threshold and top_similarity < similarity_threshold:
+                cutoff_borders.append("top")
+            if bottom_std > std_threshold and bottom_similarity < similarity_threshold:
+                cutoff_borders.append("bottom")
+            if left_std > std_threshold and left_similarity < similarity_threshold:
+                cutoff_borders.append("left")
+            if right_std > std_threshold and right_similarity < similarity_threshold:
+                cutoff_borders.append("right")
+            
+            if cutoff_borders:
+                print(f"Card appears to be cut off at: {', '.join(cutoff_borders)}")
+                return True
         
-        # Consider card cut off if most methods agree (changed from majority to 75%)
-        cut_off_decision = cut_off_votes > (total_methods * 0.75)
-        print(f"Cut-off detection result: {cut_off_votes}/{total_methods} methods indicate cut-off")
-        return cut_off_decision
+        # If we got here, the card likely has consistent borders (not cut off)
+        return False
         
     except Exception as e:
         print(f"Error checking if card is cut off: {e}")
-        return False
+        return False  # Default to False on error
 
 def detect_sports_card(image):
     """

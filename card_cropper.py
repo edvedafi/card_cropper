@@ -160,6 +160,96 @@ def is_solid_color_image(image_path, threshold=50):
         print(f"Error checking if image is solid color: {e}")
         return False  # Default to False on error
 
+def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=10):
+    """
+    Detect if a card is cut off by checking if there's a consistent background color border 
+    around the entire cropped image.
+    
+    Args:
+        cropped_image_path: Path to the cropped card image
+        original_image_path: Path to the original image (to identify background color)
+        border_check_size: Number of pixels to check from the edge
+        
+    Returns:
+        bool: True if the card appears to be cut off, False otherwise
+    """
+    try:
+        # Read the images
+        cropped_img = cv2.imread(str(cropped_image_path))
+        original_img = cv2.imread(str(original_image_path))
+        
+        if cropped_img is None or original_img is None:
+            return False  # Can't determine without both images
+            
+        # Get image dimensions
+        height, width = cropped_img.shape[:2]
+        
+        # If the image is too small to check borders effectively
+        if height < 50 or width < 50:
+            return False
+            
+        # Identify potential background color from the original image corners
+        # Take samples from the four corners and find the most common
+        corner_samples = []
+        corner_size = 20  # Get larger samples from corners to find background
+        
+        # Top-left corner
+        corner_samples.extend(original_img[0:corner_size, 0:corner_size].reshape(-1, 3))
+        # Top-right corner
+        corner_samples.extend(original_img[0:corner_size, -corner_size:].reshape(-1, 3))
+        # Bottom-left corner
+        corner_samples.extend(original_img[-corner_size:, 0:corner_size].reshape(-1, 3))
+        # Bottom-right corner
+        corner_samples.extend(original_img[-corner_size:, -corner_size:].reshape(-1, 3))
+        
+        # Convert to numpy array
+        corner_samples = np.array(corner_samples)
+        
+        # Use K-means to find the most common color in the corners
+        # This should help find the background color
+        K = 3  # Try to find the top 3 common colors
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        _, labels, centers = cv2.kmeans(np.float32(corner_samples), K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        
+        # Find the most common cluster
+        counts = np.bincount(labels.flatten())
+        most_common_cluster = np.argmax(counts)
+        background_color = centers[most_common_cluster].astype(np.uint8)
+        
+        # Check borders of the cropped image
+        top_border = cropped_img[0:border_check_size, :]
+        bottom_border = cropped_img[-border_check_size:, :]
+        left_border = cropped_img[:, 0:border_check_size]
+        right_border = cropped_img[:, -border_check_size:]
+        
+        # Calculate color distance from each border pixel to background color
+        def color_distance(pixels, bg_color):
+            return np.sqrt(np.sum((pixels - bg_color) ** 2, axis=-1))
+        
+        # Check each border for background color presence
+        thresholds = [30, 50, 70]  # Try different thresholds
+
+        # Start with strictest threshold
+        for threshold in thresholds:
+            # Calculate what percentage of each border is background
+            top_bg = np.mean(color_distance(top_border.reshape(-1, 3), background_color) < threshold)
+            bottom_bg = np.mean(color_distance(bottom_border.reshape(-1, 3), background_color) < threshold)
+            left_bg = np.mean(color_distance(left_border.reshape(-1, 3), background_color) < threshold)
+            right_bg = np.mean(color_distance(right_border.reshape(-1, 3), background_color) < threshold)
+            
+            borders_with_bg = sum([top_bg > 0.3, bottom_bg > 0.3, left_bg > 0.3, right_bg > 0.3])
+            
+            # If we have at least one border without background color at the strictest threshold
+            if borders_with_bg < 4:
+                return True
+                
+        # If all borders have background color with all thresholds, card is likely not cut off
+        return False
+        
+    except Exception as e:
+        print(f"Error checking if card is cut off: {e}")
+        return False  # Default to False on error
+
 def open_directory(directory_path):
     """
     Open a directory using the default file explorer.
@@ -485,6 +575,16 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                         error_path = errors_no_image_dir / file
                         os.makedirs(os.path.dirname(error_path), exist_ok=True)
                         user_rejected_images["no_image"].append(file)
+                        shutil.move(str(final_path), str(error_path))
+                        error_count += 1
+                        continue
+                    
+                    # Check if the card appears to be cut off
+                    if is_card_cut_off(final_path, input_path):
+                        print(f"Automatically categorizing {file} as 'Cut off' (missing background border detected)")
+                        error_path = errors_cut_off_dir / file
+                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                        user_rejected_images["cut_off"].append(file)
                         shutil.move(str(final_path), str(error_path))
                         error_count += 1
                         continue

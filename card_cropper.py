@@ -106,6 +106,60 @@ def display_image(image_path):
         print(f"Error: {e}")
         return False, "no_image"
 
+def is_solid_color_image(image_path, threshold=50):
+    """
+    Detect if an image is mostly a solid color (or very close to it).
+    
+    Args:
+        image_path: Path to the image file
+        threshold: Color variance threshold (higher = more lenient)
+        
+    Returns:
+        bool: True if the image is mostly a solid color, False otherwise
+    """
+    try:
+        # Read the image
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return True  # Can't read image, consider it a solid color
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Check if the image is very small
+        if img.shape[0] < 20 or img.shape[1] < 20:
+            return True
+        
+        # Calculate standard deviation of pixel values
+        std_dev = np.std(gray)
+        
+        # Check histogram distribution - more lenient for photos
+        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+        hist_max = np.max(hist)
+        hist_sum = np.sum(hist)
+        
+        # For photos, we'll be more lenient - if most pixels are in a small range
+        # To handle natural variations in lighting and camera sensors
+        if hist_max / hist_sum > 0.6:  # 60% of pixels in one intensity bin
+            return True
+            
+        # Check if most pixels are concentrated in a small range of the histogram
+        # Calculate how many bins contain 90% of the pixels
+        hist_normalized = hist / hist_sum
+        hist_cumulative = np.cumsum(hist_normalized)
+        bins_90_percent = np.searchsorted(hist_cumulative, 0.9)
+        
+        # If 90% of pixels are in less than 20% of possible bins, likely a near-solid color
+        if bins_90_percent < 51:  # 20% of 256 bins
+            return True
+        
+        # More lenient threshold for photos with lighting variations
+        return std_dev < threshold
+        
+    except Exception as e:
+        print(f"Error checking if image is solid color: {e}")
+        return False  # Default to False on error
+
 def open_directory(directory_path):
     """
     Open a directory using the default file explorer.
@@ -324,60 +378,6 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.imwrite(str(output_path), warped)
     return True, None
 
-def is_solid_color_image(image_path, threshold=50):
-    """
-    Detect if an image is mostly a solid color (or very close to it).
-    
-    Args:
-        image_path: Path to the image file
-        threshold: Color variance threshold (higher = more lenient)
-        
-    Returns:
-        bool: True if the image is mostly a solid color, False otherwise
-    """
-    try:
-        # Read the image
-        img = cv2.imread(str(image_path))
-        if img is None:
-            return True  # Can't read image, consider it a solid color
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # Check if the image is very small
-        if img.shape[0] < 20 or img.shape[1] < 20:
-            return True
-        
-        # Calculate standard deviation of pixel values
-        std_dev = np.std(gray)
-        
-        # Check histogram distribution - more lenient for photos
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        hist_max = np.max(hist)
-        hist_sum = np.sum(hist)
-        
-        # For photos, we'll be more lenient - if most pixels are in a small range
-        # To handle natural variations in lighting and camera sensors
-        if hist_max / hist_sum > 0.6:  # 60% of pixels in one intensity bin
-            return True
-            
-        # Check if most pixels are concentrated in a small range of the histogram
-        # Calculate how many bins contain 90% of the pixels
-        hist_normalized = hist / hist_sum
-        hist_cumulative = np.cumsum(hist_normalized)
-        bins_90_percent = np.searchsorted(hist_cumulative, 0.9)
-        
-        # If 90% of pixels are in less than 20% of possible bins, likely a near-solid color
-        if bins_90_percent < 51:  # 20% of 256 bins
-            return True
-        
-        # More lenient threshold for photos with lighting variations
-        return std_dev < threshold
-        
-    except Exception as e:
-        print(f"Error checking if image is solid color: {e}")
-        return False  # Default to False on error
-
 def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, additional_params=None):
     """
     Process a zip file containing images.
@@ -405,8 +405,16 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     errors_other_dir = errors_base_dir / "other"
     errors_processing_dir = errors_base_dir / "processing"
     
-    # Create input and output directories if they don't exist
-    input_dir.mkdir(exist_ok=True, parents=True)
+    # Clean input directory if requested
+    if clean_input and input_dir.exists():
+        print(f"Cleaning input directory {input_dir}...")
+        for item in input_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+    
+    input_dir.mkdir(exist_ok=True)
     final_dir.mkdir(exist_ok=True, parents=True)
     debug_dir.mkdir(exist_ok=True, parents=True)
     
@@ -418,200 +426,177 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     errors_other_dir.mkdir(exist_ok=True, parents=True)
     errors_processing_dir.mkdir(exist_ok=True, parents=True)
     
-    # Clean input directory if requested
-    if clean_input:
-        print(f"Cleaning input directory {input_dir}...")
-        for item in input_dir.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
-    
-    # Extract zip file
     print(f"Processing {zip_path}...")
     print(f"Extracting to {input_dir}")
-    start_time = time.time()
     
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(input_dir)
-            
-        # Get all image files in the input directory
-        image_files = []
-        image_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-        for root, _, files in os.walk(input_dir):
-            for file in files:
-                if file.lower().endswith(image_extensions):
-                    relative_path = os.path.relpath(os.path.join(root, file), input_dir)
-                    image_files.append(relative_path)
-                    
-        total_images = len(image_files)
-        print(f"Found {total_images} images in the zip file")
-        
-        # Track counts and errors
-        processed_count = 0
-        successful_count = 0
-        skipped_count = 0
-        
-        # Track error images with reasons
-        error_images = []  # List to store tuples of (filename, reason)
-        user_rejected_images = {
-            "no_image": [],
-            "cut_off": [],
-            "skewed": [],
-            "other": []
-        }
-        
-        # Process each image
-        for file in image_files:
-            # Convert string path to Path object
-            file_path = Path(file)
-            input_path = input_dir / file_path
-            final_path = final_dir / file_path
-            
-            if input_path.is_file():
+    # Extract zip contents to input directory
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(input_dir)
+    
+    # Define common image extensions
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+    
+    # Process image files
+    processed_count = 0
+    skipped_count = 0
+    error_count = 0
+    
+    # Track error images with reasons
+    error_images = []  # List to store tuples of (filename, reason)
+    user_rejected_images = {
+        "no_image": [],
+        "cut_off": [],
+        "skewed": [],
+        "other": []
+    }
+    
+    start_time = time.time()
+    total_images = 0
+    
+    # First, count total images
+    for root, _, files in os.walk(input_dir):
+        for file in files:
+            if any(file.lower().endswith(ext) for ext in image_extensions):
+                total_images += 1
+    
+    print(f"Found {total_images} images in the zip file")
+    
+    # Process each image
+    for root, _, files in os.walk(input_dir):
+        for file in files:
+            if any(file.lower().endswith(ext) for ext in image_extensions):
+                input_path = os.path.join(root, file)
+                final_path = final_dir / file
+                debug_path = debug_dir / file
+                
                 print(f"Processing image {processed_count + 1}/{total_images}: {file}")
                 
-                # Create parent directories for output files if they don't exist
-                final_path.parent.mkdir(exist_ok=True, parents=True)
-                
-                try:
-                    # Check if image is solid color first
-                    if is_solid_color_image(input_path):
-                        print(f"Automatically categorizing {file} as 'No image' (solid color detected)")
-                        error_path = errors_no_image_dir / file_path
-                        error_path.parent.mkdir(exist_ok=True, parents=True)
-                        user_rejected_images["no_image"].append(str(file))
-                        shutil.copy2(input_path, error_path)
-                        processed_count += 1
-                        continue
-                    
-                    # Process the image
-                    success, error_reason = crop_largest_object(input_path, final_path, border_size)
-                    
-                    if success:
-                        processed_count += 1
-                        
-                        # Show the cropped image and get user verification
-                        is_correct, error_category = display_image(final_path)
-                        
-                        if is_correct:
-                            successful_count += 1
-                        else:
-                            # Move to appropriate error directory based on the category
-                            if error_category == "no_image":
-                                error_path = errors_no_image_dir / file_path
-                                error_dir_name = "no_image"
-                                user_rejected_images["no_image"].append(str(file))
-                            elif error_category == "cut_off":
-                                error_path = errors_cut_off_dir / file_path
-                                error_dir_name = "cut_off"
-                                user_rejected_images["cut_off"].append(str(file))
-                            elif error_category == "skewed":
-                                error_path = errors_skewed_dir / file_path
-                                error_dir_name = "skewed"
-                                user_rejected_images["skewed"].append(str(file))
-                            elif error_category == "other":
-                                error_path = errors_other_dir / file_path
-                                error_dir_name = "other"
-                                user_rejected_images["other"].append(str(file))
-                            else:
-                                # Fallback if category is not recognized
-                                error_path = errors_base_dir / file_path
-                                error_dir_name = "unspecified"
-                                
-                            # Move input image to appropriate error category
-                            os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                            shutil.copy2(input_path, error_path)
-                            print(f"Image rejected as '{error_dir_name}', saved to {error_path}")
-                            
-                            # Remove the file from final directory
-                            if final_path.exists():
-                                os.remove(final_path)
-                    else:
-                        processed_count += 1
-                        # If contour detection failed, categorize as "no_image" automatically
-                        if "No suitable contours found" in error_reason:
-                            print(f"Automatically categorizing {file} as 'No image' (no card detected)")
-                            error_path = errors_no_image_dir / file_path
-                            error_path.parent.mkdir(exist_ok=True, parents=True)
-                            user_rejected_images["no_image"].append(str(file))
-                            shutil.copy2(input_path, error_path)
-                        else:
-                            # Other processing errors
-                            error_images.append((file, error_reason))
-                            
-                            # Move processing errors to their own directory
-                            if Path(input_path).is_file():
-                                error_path = errors_processing_dir / file_path
-                                os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                                shutil.copy(str(input_path), str(error_path))
-                except Exception as e:
-                    processed_count += 1
-                    error_reason = f"Error processing image: {e}"
-                    error_images.append((file, error_reason))
-                    error_path = errors_processing_dir / file_path
+                # Check if image is solid color first
+                if is_solid_color_image(input_path):
+                    print(f"Automatically categorizing {file} as 'No image' (solid color detected)")
+                    error_path = errors_no_image_dir / file
+                    # Ensure parent directory exists
                     os.makedirs(os.path.dirname(error_path), exist_ok=True)
-                    shutil.copy(str(input_path), str(error_path))
-            else:
-                print(f"Warning: file not found or not a file: {input_path}")
-                skipped_count += 1
+                    user_rejected_images["no_image"].append(file)
+                    shutil.copy2(input_path, error_path)
+                    processed_count += 1
+                    continue
+                
+                # Process the image
+                success, error_reason = crop_largest_object(input_path, final_path, border_size)
+                if success:
+                    processed_count += 1
+                    
+                    # Display the image and ask for verification
+                    print(f"\nVerifying image: {file}")
+                    is_correct, error_category = display_image(final_path)
+                    
+                    if not is_correct:
+                        # Move to appropriate error directory based on the category
+                        if error_category == "no_image":
+                            error_path = errors_no_image_dir / file
+                            error_dir_name = "no_image"
+                            user_rejected_images["no_image"].append(file)
+                        elif error_category == "cut_off":
+                            error_path = errors_cut_off_dir / file
+                            error_dir_name = "cut_off"
+                            user_rejected_images["cut_off"].append(file)
+                        elif error_category == "skewed":
+                            error_path = errors_skewed_dir / file
+                            error_dir_name = "skewed"
+                            user_rejected_images["skewed"].append(file)
+                        elif error_category == "other":
+                            error_path = errors_other_dir / file
+                            error_dir_name = "other"
+                            user_rejected_images["other"].append(file)
+                        else:
+                            # Fallback if category is not recognized
+                            error_path = errors_base_dir / file
+                            error_dir_name = "unspecified"
+                            
+                        shutil.move(str(final_path), str(error_path))
+                        print(f"Moved incorrect image to: {error_path}")
+                        error_count += 1
+                    else:
+                        print("Image verified as correct.")
+                else:
+                    processed_count += 1
+                    
+                    # Automatically categorize images with no contours as "no_image"
+                    if error_reason and "No suitable contours found" in error_reason:
+                        print(f"Automatically categorizing {file} as 'No image' (no card detected)")
+                        error_path = errors_no_image_dir / file
+                        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+                        user_rejected_images["no_image"].append(file)
+                        shutil.copy2(input_path, error_path)
+                    else:
+                        # Other processing errors
+                        error_images.append((file, error_reason or "Unknown error"))
+                        # Move processing errors to their own directory
+                        if Path(input_path).is_file():
+                            error_path = errors_processing_dir / file
+                            shutil.copy(str(input_path), str(error_path))
+                
+                # Update progress
+                if processed_count % 5 == 0:  # Update every 5 images
+                    elapsed = time.time() - start_time
+                    rate = processed_count / elapsed if elapsed > 0 else 0
+                    print(f"Progress: {processed_count}/{total_images} images ({rate:.2f} images/second)")
+    
+    # Count errors by category
+    no_image_count = len(user_rejected_images["no_image"])
+    cut_off_count = len(user_rejected_images["cut_off"])
+    skewed_count = len(user_rejected_images["skewed"])
+    other_count = len(user_rejected_images["other"])
+    processing_error_count = len(error_images)
+    
+    # Print summary
+    elapsed = time.time() - start_time
+    print(f"\nProcessing complete!")
+    print(f"Time taken: {elapsed:.2f} seconds")
+    print(f"Successfully cropped {processed_count - error_count} images with {border_size}px border to {final_dir}")
+    print(f"Debug images saved to {debug_dir}")
+    
+    # Print error summary
+    total_errors = no_image_count + cut_off_count + skewed_count + other_count + processing_error_count
+    if total_errors > 0:
+        print("\n==== Error Summary ====")
         
-        # Calculate elapsed time
-        elapsed_time = time.time() - start_time
-        print("\nProcessing complete!")
-        print(f"Time taken: {elapsed_time:.2f} seconds")
-        print(f"Successfully cropped {successful_count} images")
+        # Report user-rejected images by category
+        if no_image_count > 0:
+            print(f"\nNo image detected ({no_image_count} images):")
+            for idx, filename in enumerate(user_rejected_images["no_image"], 1):
+                print(f"{idx}. {filename}")
+                
+        if cut_off_count > 0:
+            print(f"\nImage cut off ({cut_off_count} images):")
+            for idx, filename in enumerate(user_rejected_images["cut_off"], 1):
+                print(f"{idx}. {filename}")
+                
+        if skewed_count > 0:
+            print(f"\nImage skewed ({skewed_count} images):")
+            for idx, filename in enumerate(user_rejected_images["skewed"], 1):
+                print(f"{idx}. {filename}")
         
-        # Count errors by category
-        no_image_count = len(user_rejected_images["no_image"])
-        cut_off_count = len(user_rejected_images["cut_off"])
-        skewed_count = len(user_rejected_images["skewed"])
-        other_count = len(user_rejected_images["other"])
-        processing_error_count = len(error_images)
+        if other_count > 0:
+            print(f"\nOther issues ({other_count} images):")
+            for idx, filename in enumerate(user_rejected_images["other"], 1):
+                print(f"{idx}. {filename}")
         
-        # Print error summary
-        total_errors = no_image_count + cut_off_count + skewed_count + other_count + processing_error_count
+        # Report processing errors
+        if processing_error_count > 0:
+            print(f"\nProcessing errors ({processing_error_count} images):")
+            for idx, (filename, reason) in enumerate(error_images, 1):
+                print(f"{idx}. {filename}: {reason}")
+        
+        # Report total errors
         if total_errors > 0:
-            print("\n==== Error Summary ====")
-            
-            # Report user-rejected images by category
-            if no_image_count > 0:
-                print(f"\nNo image detected ({no_image_count} images):")
-                for idx, filename in enumerate(user_rejected_images["no_image"], 1):
-                    print(f"{idx}. {filename}")
-                    
-            if cut_off_count > 0:
-                print(f"\nImage cut off ({cut_off_count} images):")
-                for idx, filename in enumerate(user_rejected_images["cut_off"], 1):
-                    print(f"{idx}. {filename}")
-                    
-            if skewed_count > 0:
-                print(f"\nImage skewed ({skewed_count} images):")
-                for idx, filename in enumerate(user_rejected_images["skewed"], 1):
-                    print(f"{idx}. {filename}")
-                    
-            if other_count > 0:
-                print(f"\nOther issues ({other_count} images):")
-                for idx, filename in enumerate(user_rejected_images["other"], 1):
-                    print(f"{idx}. {filename}")
-            
-            # Report processing errors
-            if processing_error_count > 0:
-                print(f"\nProcessing errors ({processing_error_count} images):")
-                for idx, (filename, reason) in enumerate(error_images, 1):
-                    print(f"{idx}. {filename}: {reason}")
-            
-            # Report total errors
-            if total_errors > 0:
-                error_percentage = (total_errors / processed_count) * 100 if processed_count > 0 else 0
-                print(f"\nTotal error images: {total_errors} ({error_percentage:.1f}% of processed images)")
-                print(f"Error images saved to: {errors_base_dir}")
-        
-        if skipped_count > 0:
-            print(f"Skipped {skipped_count} images")
-    except Exception as e:
-        print(f"Error processing zip file: {e}")
+            error_percentage = (total_errors / processed_count) * 100 if processed_count > 0 else 0
+            print(f"\nTotal error images: {total_errors} ({error_percentage:.1f}% of processed images)")
+            print(f"Error images saved to: {errors_base_dir}")
+    
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} images")
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')

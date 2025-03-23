@@ -9,53 +9,118 @@ from pathlib import Path
 import time
 import subprocess
 import sys
+import tty
+import termios
 from term_image.image import from_file
+
+def get_key():
+    """
+    Get a single keypress from the user without requiring Enter.
+    """
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
 
 def display_image(image_path):
     """
     Display an image in the terminal using term-image library.
-    Returns True if the user confirms the image is correct, False otherwise.
+    Returns a tuple of (is_correct, error_category) where error_category is None if is_correct is True,
+    or one of "no_image", "cut_off", "skewed", "other" if is_correct is False.
     """
     try:
         # Get image info with OpenCV
         cv_image = cv2.imread(str(image_path))
         if cv_image is None:
             print(f"Error: Could not read image {image_path}")
-            return False
+            return False, "no_image"
             
         # Display image dimensions
         print(f"\nImage: {os.path.basename(image_path)}")
         print(f"Dimensions: {cv_image.shape[1]}x{cv_image.shape[0]}")
         
-        # Use term-image to display the image
-        try:
-            # Load and render the image
-            term_img = from_file(str(image_path))
-            
-            # Set the size to fit in terminal - fixed for Size issue
-            term_img.set_size(height=24)  # Fixed height instead of width to avoid Size error
-            
-            # Display the image
-            print(term_img)
-        except Exception as e:
-            print(f"Could not display image with term-image: {e}")
-            print("Opening with system viewer instead...")
+        # Check if running in Cursor (can detect via environment variables)
+        is_cursor = any('CURSOR' in env_var for env_var in os.environ.keys())
+        
+        # Use system viewer directly if in Cursor
+        if is_cursor:
+            print("Detected Cursor editor, opening with system viewer for better image quality...")
             if sys.platform == 'darwin':
                 subprocess.run(['open', str(image_path)], check=True)
             elif sys.platform.startswith('linux'):
                 subprocess.run(['xdg-open', str(image_path)], check=True)
             elif sys.platform == 'win32':
                 subprocess.run(['start', str(image_path)], check=True)
+        else:
+            # Use term-image for terminals that support it well (like iTerm2)
+            try:
+                # Load and render the image
+                term_img = from_file(str(image_path))
+                
+                # Set the size to fit in terminal
+                term_img.set_size(height=24)  # Fixed height instead of width to avoid Size error
+                
+                # Display the image
+                print(term_img)
+            except Exception as e:
+                print(f"Could not display image with term-image: {e}")
+                print("Opening with system viewer instead...")
+                if sys.platform == 'darwin':
+                    subprocess.run(['open', str(image_path)], check=True)
+                elif sys.platform.startswith('linux'):
+                    subprocess.run(['xdg-open', str(image_path)], check=True)
+                elif sys.platform == 'win32':
+                    subprocess.run(['start', str(image_path)], check=True)
             
-        # Get user verification
+        # Get user verification with multiple options
+        print("\nPlease choose an option:")
+        print("1. Correct - Image looks good")
+        print("2. No image - Can't see the card at all")
+        print("3. Cut off - Part of the card is missing")
+        print("4. Skewed - Card is distorted or at wrong angle")
+        print("5. Other - Other issue not covered above")
+        print("\nPress a key (1-5): ", end='', flush=True)
+        
         while True:
-            response = input("\nIs this image correct? (y/n): ").lower()
-            if response in ['y', 'n']:
-                return response == 'y'
-            print("Please enter 'y' for yes or 'n' for no.")
+            response = get_key()
+            print(response)  # Echo the key pressed
+            if response in ['1', '2', '3', '4', '5']:
+                if response == '1':
+                    return True, None
+                elif response == '2':
+                    return False, "no_image"
+                elif response == '3':
+                    return False, "cut_off"
+                elif response == '4':
+                    return False, "skewed"
+                elif response == '5':
+                    return False, "other"
+            else:
+                print("Please press a key between 1 and 5: ", end='', flush=True)
             
     except Exception as e:
         print(f"Error: {e}")
+        return False, "no_image"
+
+def open_directory(directory_path):
+    """
+    Open a directory using the default file explorer.
+    """
+    try:
+        print(f"Opening directory: {directory_path}")
+        if sys.platform == 'darwin':
+            subprocess.run(['open', str(directory_path)], check=True)
+        elif sys.platform.startswith('linux'):
+            subprocess.run(['xdg-open', str(directory_path)], check=True)
+        elif sys.platform == 'win32':
+            subprocess.run(['start', '', str(directory_path)], shell=True, check=True)
+        return True
+    except Exception as e:
+        print(f"Error opening directory: {e}")
         return False
 
 def crop_largest_object(image_path, output_path, border_size=5):
@@ -67,12 +132,16 @@ def crop_largest_object(image_path, output_path, border_size=5):
         image_path: Path to the input image
         output_path: Path to save the cropped image
         border_size: Number of pixels to add as border around the detected card
+        
+    Returns:
+        tuple: (success, error_reason) - success is True/False, error_reason is a string or None
     """
     # Read the image
     image = cv2.imread(str(image_path))
     if image is None:
-        print(f"Error: Could not read image {image_path}")
-        return False
+        error_reason = "Could not read image"
+        print(f"Error: {error_reason} {image_path}")
+        return False, error_reason
     
     # Create a copy for output
     orig = image.copy()
@@ -146,9 +215,10 @@ def crop_largest_object(image_path, output_path, border_size=5):
     
     # If no good contour found
     if best_contour is None or best_contour_area < (height * width * 0.005):  # Even lower threshold: 0.5%
-        print(f"No suitable contours found in {image_path}, skipping...")
+        error_reason = "No suitable contours found"
+        print(f"{error_reason} in {image_path}, skipping...")
         cv2.imwrite(str(output_path), orig)
-        return False
+        return False, error_reason
     
     # Draw the contour on a debug image
     debug_image = orig.copy()
@@ -227,9 +297,10 @@ def crop_largest_object(image_path, output_path, border_size=5):
     
     # Ensure reasonable dimensions
     if max_width < 10 or max_height < 10 or max_width > width * 1.5 or max_height > height * 1.5:
-        print(f"Invalid dimensions detected in {image_path}, skipping...")
+        error_reason = "Invalid dimensions detected"
+        print(f"{error_reason} in {image_path}, skipping...")
         cv2.imwrite(str(output_path), debug_image)
-        return False
+        return False, error_reason
     
     # Add border to dimensions (2 * border_size because we add to both sides)
     output_width = max_width + (2 * border_size)
@@ -251,9 +322,9 @@ def crop_largest_object(image_path, output_path, border_size=5):
     
     # Save the cropped image
     cv2.imwrite(str(output_path), warped)
-    return True
+    return True, None
 
-def process_zip_file(zip_path, border_size=5, clean_input=True, additional_params=None):
+def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, additional_params=None):
     """
     Process a zip file containing images.
     
@@ -261,6 +332,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
         zip_path: Path to the zip file
         border_size: Size of border to add around detected cards
         clean_input: Whether to clean the input directory before extraction
+        open_errors_dir: Whether to open the errors directory after processing (always False now)
         additional_params: Dictionary of additional parameters to adjust processing
     """
     # Get the base name of the zip file without extension
@@ -270,7 +342,14 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     input_dir = Path("input")
     final_dir = Path("output") / "final" / zip_name
     debug_dir = Path("output") / "debug" / zip_name
-    errors_dir = Path("output") / "errors" / zip_name
+    
+    # Create error category directories
+    errors_base_dir = Path("output") / "errors" / zip_name
+    errors_no_image_dir = errors_base_dir / "no_image"
+    errors_cut_off_dir = errors_base_dir / "cut_off"
+    errors_skewed_dir = errors_base_dir / "skewed"
+    errors_other_dir = errors_base_dir / "other"
+    errors_processing_dir = errors_base_dir / "processing"
     
     # Clean input directory if requested
     if clean_input and input_dir.exists():
@@ -284,7 +363,14 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     input_dir.mkdir(exist_ok=True)
     final_dir.mkdir(exist_ok=True, parents=True)
     debug_dir.mkdir(exist_ok=True, parents=True)
-    errors_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Create all error directories
+    errors_base_dir.mkdir(exist_ok=True, parents=True)
+    errors_no_image_dir.mkdir(exist_ok=True, parents=True)
+    errors_cut_off_dir.mkdir(exist_ok=True, parents=True)
+    errors_skewed_dir.mkdir(exist_ok=True, parents=True)
+    errors_other_dir.mkdir(exist_ok=True, parents=True)
+    errors_processing_dir.mkdir(exist_ok=True, parents=True)
     
     print(f"Processing {zip_path}...")
     print(f"Extracting to {input_dir}")
@@ -300,6 +386,15 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
     processed_count = 0
     skipped_count = 0
     error_count = 0
+    
+    # Track error images with reasons
+    error_images = []  # List to store tuples of (filename, reason)
+    user_rejected_images = {
+        "no_image": [],
+        "cut_off": [],
+        "skewed": [],
+        "other": []
+    }
     
     start_time = time.time()
     total_images = 0
@@ -323,14 +418,37 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
                 print(f"Processing image {processed_count + 1}/{total_images}: {file}")
                 
                 # Process the image
-                if crop_largest_object(input_path, final_path, border_size):
+                success, error_reason = crop_largest_object(input_path, final_path, border_size)
+                if success:
                     processed_count += 1
                     
                     # Display the image and ask for verification
                     print(f"\nVerifying image: {file}")
-                    if not display_image(final_path):
-                        # Move to errors directory if incorrect
-                        error_path = errors_dir / file
+                    is_correct, error_category = display_image(final_path)
+                    
+                    if not is_correct:
+                        # Move to appropriate error directory based on the category
+                        if error_category == "no_image":
+                            error_path = errors_no_image_dir / file
+                            error_dir_name = "no_image"
+                            user_rejected_images["no_image"].append(file)
+                        elif error_category == "cut_off":
+                            error_path = errors_cut_off_dir / file
+                            error_dir_name = "cut_off"
+                            user_rejected_images["cut_off"].append(file)
+                        elif error_category == "skewed":
+                            error_path = errors_skewed_dir / file
+                            error_dir_name = "skewed"
+                            user_rejected_images["skewed"].append(file)
+                        elif error_category == "other":
+                            error_path = errors_other_dir / file
+                            error_dir_name = "other"
+                            user_rejected_images["other"].append(file)
+                        else:
+                            # Fallback if category is not recognized
+                            error_path = errors_base_dir / file
+                            error_dir_name = "unspecified"
+                            
                         shutil.move(str(final_path), str(error_path))
                         print(f"Moved incorrect image to: {error_path}")
                         error_count += 1
@@ -338,24 +456,72 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, additional_param
                         print("Image verified as correct.")
                 else:
                     skipped_count += 1
+                    error_images.append((file, error_reason or "Unknown error"))
+                    # Move processing errors to their own directory
+                    if Path(input_path).is_file():
+                        error_path = errors_processing_dir / file
+                        shutil.copy(str(input_path), str(error_path))
                 
                 # Update progress
-                if processed_count % 10 == 0:
+                if processed_count % 5 == 0:  # Update every 5 images
                     elapsed = time.time() - start_time
-                    rate = processed_count / elapsed
+                    rate = processed_count / elapsed if elapsed > 0 else 0
                     print(f"Progress: {processed_count}/{total_images} images ({rate:.2f} images/second)")
+    
+    # Count errors by category
+    no_image_count = len(user_rejected_images["no_image"])
+    cut_off_count = len(user_rejected_images["cut_off"])
+    skewed_count = len(user_rejected_images["skewed"])
+    other_count = len(user_rejected_images["other"])
+    processing_error_count = len(error_images)
     
     # Print summary
     elapsed = time.time() - start_time
     print(f"\nProcessing complete!")
     print(f"Time taken: {elapsed:.2f} seconds")
-    print(f"Successfully cropped {processed_count} images with {border_size}px border to {final_dir}")
+    print(f"Successfully cropped {processed_count - error_count} images with {border_size}px border to {final_dir}")
     print(f"Debug images saved to {debug_dir}")
-    print(f"Error images moved to {errors_dir}")
+    
+    # Print error summary
+    total_errors = no_image_count + cut_off_count + skewed_count + other_count + processing_error_count
+    if total_errors > 0:
+        print("\n==== Error Summary ====")
+        
+        # Report user-rejected images by category
+        if no_image_count > 0:
+            print(f"\nNo image detected ({no_image_count} images):")
+            for idx, filename in enumerate(user_rejected_images["no_image"], 1):
+                print(f"{idx}. {filename}")
+                
+        if cut_off_count > 0:
+            print(f"\nImage cut off ({cut_off_count} images):")
+            for idx, filename in enumerate(user_rejected_images["cut_off"], 1):
+                print(f"{idx}. {filename}")
+                
+        if skewed_count > 0:
+            print(f"\nImage skewed ({skewed_count} images):")
+            for idx, filename in enumerate(user_rejected_images["skewed"], 1):
+                print(f"{idx}. {filename}")
+        
+        if other_count > 0:
+            print(f"\nOther issues ({other_count} images):")
+            for idx, filename in enumerate(user_rejected_images["other"], 1):
+                print(f"{idx}. {filename}")
+        
+        # Report processing errors
+        if processing_error_count > 0:
+            print(f"\nProcessing errors ({processing_error_count} images):")
+            for idx, (filename, reason) in enumerate(error_images, 1):
+                print(f"{idx}. {filename}: {reason}")
+        
+        # Report total errors
+        if total_errors > 0:
+            error_percentage = (total_errors / processed_count) * 100 if processed_count > 0 else 0
+            print(f"\nTotal error images: {total_errors} ({error_percentage:.1f}% of processed images)")
+            print(f"Error images saved to: {errors_base_dir}")
+    
     if skipped_count > 0:
         print(f"Skipped {skipped_count} images")
-    if error_count > 0:
-        print(f"{error_count} images moved to errors directory")
 
 def main():
     parser = argparse.ArgumentParser(description='Process a zip file containing images.')
@@ -363,10 +529,12 @@ def main():
     parser.add_argument('--border', type=int, default=5, help='Size of border (in pixels) to add around detected cards. Default is 5.')
     parser.add_argument('--clean', action='store_true', default=True, help='Clean input directory before extraction (default: True)')
     parser.add_argument('--no-clean', dest='clean', action='store_false', help='Do not clean input directory before extraction')
+    parser.add_argument('--open-errors', action='store_true', default=False, help='Open errors directory after processing (default: False)')
+    parser.add_argument('--no-open-errors', dest='open_errors', action='store_false', help='Do not open errors directory after processing')
     
     args = parser.parse_args()
     
-    process_zip_file(args.zip_path, args.border, args.clean)
+    process_zip_file(args.zip_path, args.border, args.clean, args.open_errors)
 
 if __name__ == "__main__":
     main() 

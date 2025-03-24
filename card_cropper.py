@@ -439,8 +439,29 @@ def crop_largest_object(image_path, output_path, border_size=5):
     cv2.drawContours(debug_image, [largest_contour], -1, (0, 255, 0), 2)
     
     # Save debug image to the debug directory
-    debug_path = str(output_path).replace('/final/', '/debug/')
-    debug_path = debug_path.replace('.jpg', '_debug.jpg').replace('.jpeg', '_debug.jpeg').replace('.png', '_debug.png')
+    # Extract test name from the output path structure (output/{test_name}/...)
+    output_path_str = str(output_path)
+    parts = Path(output_path_str).parts
+    
+    # Find "output" in the parts to get the test name
+    if "output" in parts:
+        output_index = parts.index("output")
+        if output_index + 1 < len(parts):
+            test_name = parts[output_index + 1]  # The part right after "output"
+        else:
+            test_name = "unknown"
+    else:
+        test_name = "unknown"
+    
+    # Create path for the debug directory
+    debug_dir = os.path.join("output", test_name, "debug")
+    os.makedirs(debug_dir, exist_ok=True)
+    
+    # Get the debug file base name
+    debug_base = os.path.basename(output_path_str)
+    
+    # Save the debug image in the correct debug directory
+    debug_path = os.path.join(debug_dir, f"contours_{debug_base}")
     cv2.imwrite(debug_path, debug_image)
     
     # Approximate the contour
@@ -507,6 +528,9 @@ def crop_largest_object(image_path, output_path, border_size=5):
     # Apply perspective transformation to the new dimensions with border
     warped = cv2.warpPerspective(orig, transform_matrix, (output_width, output_height))
     
+    # Create the output directory if needed
+    os.makedirs(os.path.dirname(str(output_path)), exist_ok=True)
+    
     # Save the cropped image
     cv2.imwrite(str(output_path), warped)
     return True, None
@@ -524,28 +548,25 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     # Extract the name of the zip file without extension for using in output paths
     zip_name = os.path.splitext(os.path.basename(zip_path))[0]
     
-    # Clean the input directory if requested
-    input_dir = "input"
-    if clean_input:
-        print(f"Cleaning input directory {input_dir}...")
-        if os.path.exists(input_dir):
-            for item in os.listdir(input_dir):
-                item_path = os.path.join(input_dir, item)
-                if os.path.isfile(item_path):
-                    os.remove(item_path)
-                elif os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
+    # Create the new output directory structure
+    # All outputs will be in output/{test_name}/...
+    test_output_dir = Path("output") / zip_name
     
-    # Create directories for output
-    final_dir = Path("output") / "final" / zip_name
-    debug_dir = Path("output") / "debug" / zip_name
-    errors_dir = Path("output") / "errors" / zip_name
+    # Define subdirectories
+    test_input_dir = test_output_dir / "input"  # Store original images
+    final_dir = test_output_dir / "final"       # Store successful crops
+    debug_dir = test_output_dir / "debug"       # Store debug images
+    errors_dir = test_output_dir / "errors"     # Store error cases
+    
+    # Create subdirectories for error categories
     errors_no_image_dir = errors_dir / "no_image"
     errors_cut_off_dir = errors_dir / "cut_off"
     errors_skewed_dir = errors_dir / "skewed"
     errors_other_dir = errors_dir / "other"
     errors_processing_dir = errors_dir / "processing"
     
+    # Create all directories
+    test_input_dir.mkdir(exist_ok=True, parents=True)
     final_dir.mkdir(exist_ok=True, parents=True)
     debug_dir.mkdir(exist_ok=True, parents=True)
     errors_dir.mkdir(exist_ok=True, parents=True)
@@ -555,16 +576,16 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
     errors_other_dir.mkdir(exist_ok=True, parents=True)
     errors_processing_dir.mkdir(exist_ok=True, parents=True)
     
-    # Extract the zip file
+    # Extract the zip file directly to our new input directory
     print(f"Processing {zip_path}...")
-    print(f"Extracting to {input_dir}")
+    print(f"Extracting to {test_input_dir}")
     
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(input_dir)
+        zip_ref.extractall(str(test_input_dir))
     
-    # Get list of image files
+    # Get list of image files from our test input directory
     image_files = []
-    for root, _, files in os.walk(input_dir):
+    for root, _, files in os.walk(test_input_dir):
         for file in files:
             if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')):
                 image_files.append(os.path.join(root, file))
@@ -785,27 +806,27 @@ def second_pass_processing(image_path, output_path, border_size=5):
         height, width = image.shape[:2]
         print(f"DEBUG: Second pass - Image size: {width}x{height}")
         
-        # Create a directory for debug images
-        debug_dir = os.path.dirname(output_path)
-        debug_base = os.path.basename(output_path)
-        
-        # Create a dedicated second_pass subdirectory inside the debug directory
-        zip_name = os.path.basename(os.path.dirname(str(output_path)))
-        # Fix the directory structure - retrieve the zip name correctly
+        # Extract the test name from the output path
+        # The structure is now: output/{test_name}/errors/processing/second_pass_file.jpg
         output_path_str = str(output_path)
-        if 'processing' in output_path_str:
-            # If path contains 'processing', extract the correct zip name
-            parts = os.path.normpath(output_path_str).split(os.sep)
-            try:
-                processing_index = parts.index('processing')
-                if processing_index > 0 and processing_index + 1 < len(parts):
-                    zip_name = parts[processing_index - 1]  # Get the directory name before 'processing'
-            except ValueError:
-                # 'processing' not found in path
-                pass
+        parts = Path(output_path_str).parts
         
-        second_pass_debug_dir = os.path.join("output", "debug", zip_name, "second_pass")
+        # Find "output" in the parts to get the test name
+        if "output" in parts:
+            output_index = parts.index("output")
+            if output_index + 1 < len(parts):
+                test_name = parts[output_index + 1]  # The part right after "output"
+            else:
+                test_name = "unknown"
+        else:
+            test_name = "unknown"
+        
+        # Create path for the second_pass debug directory
+        second_pass_debug_dir = os.path.join("output", test_name, "debug", "second_pass")
         os.makedirs(second_pass_debug_dir, exist_ok=True)
+        
+        # Get the debug file base name
+        debug_base = os.path.basename(output_path_str)
         
         # Print debug info for directory structure
         print(f"DEBUG: Saving second pass debug images to {second_pass_debug_dir}")
@@ -1286,15 +1307,28 @@ def main():
     if args.single_image or args.file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')):
         print(f"Processing single image: {args.file_path}")
         
-        # Create output directories
-        final_dir = Path("output") / "final" / "single"
-        debug_dir = Path("output") / "debug" / "single"
+        # Get the file name without extension as the test name
+        file_name = os.path.basename(args.file_path)
+        test_name = os.path.splitext(file_name)[0]
+        
+        # Create test directory structure
+        test_output_dir = Path("output") / test_name
+        test_input_dir = test_output_dir / "input"
+        final_dir = test_output_dir / "final"
+        debug_dir = test_output_dir / "debug"
+        
+        # Create directories
+        test_input_dir.mkdir(exist_ok=True, parents=True)
         final_dir.mkdir(exist_ok=True, parents=True)
         debug_dir.mkdir(exist_ok=True, parents=True)
         
+        # Copy the image to the input directory
+        input_copy_path = test_input_dir / file_name
+        shutil.copy2(args.file_path, input_copy_path)
+        
         # Process the image
-        output_path = final_dir / os.path.basename(args.file_path)
-        success, error_reason = crop_largest_object(args.file_path, output_path, args.border)
+        output_path = final_dir / file_name
+        success, error_reason = crop_largest_object(str(input_copy_path), output_path, args.border)
         
         if success:
             print(f"Successfully processed {args.file_path}")
@@ -1305,6 +1339,16 @@ def main():
             
             if not is_correct:
                 print(f"Image verification failed: {error_category}")
+                
+                # Create error directories
+                errors_dir = test_output_dir / "errors"
+                error_category_dir = errors_dir / error_category
+                error_category_dir.mkdir(exist_ok=True, parents=True)
+                
+                # Copy the original image to the appropriate error directory
+                error_path = error_category_dir / file_name
+                shutil.copy2(str(input_copy_path), error_path)
+                print(f"Original image saved to: {error_path}")
         else:
             print(f"Failed to process {args.file_path}: {error_reason}")
     else:

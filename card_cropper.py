@@ -12,7 +12,6 @@ import sys
 import tty
 import termios
 from term_image.image import from_file
-import traceback
 
 def get_key():
     """
@@ -377,7 +376,8 @@ def open_directory(directory_path):
 
 def crop_largest_object(image_path, output_path, border_size=5):
     """
-    Find and crop the largest object (card) in an image.
+    Detects and crops the largest object (card/rectangle) in the image,
+    correcting for perspective if the rectangle is skewed.
     
     Args:
         image_path: Path to the input image
@@ -387,134 +387,131 @@ def crop_largest_object(image_path, output_path, border_size=5):
     Returns:
         tuple: (success, error_reason) - success is True/False, error_reason is a string or None
     """
-    try:
-        # Read the image
-        print(f"Reading image from {image_path}")
-        image = cv2.imread(str(image_path))
-        if image is None:
-            error_reason = "Could not read image"
-            print(f"Error: {error_reason} {image_path}")
-            return False, error_reason
-        
-        # Create a debug copy
-        debug_image = image.copy()
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Apply edge detection
-        edges = cv2.Canny(blurred, 75, 200)
-        
-        # Dilate to connect edge fragments
-        kernel = np.ones((5, 5), np.uint8)
-        dilated = cv2.dilate(edges, kernel, iterations=1)
-        
-        # Find contours
-        contours, _ = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Add a debug message
-        print(f"Found {len(contours)} contours")
-        
-        if not contours:
-            error_reason = "No suitable contours found"
-            print(f"Error: {error_reason}")
-            cv2.imwrite(str(output_path), image)  # Save original image for debugging
-            return False, error_reason
-        
-        # Find the largest contour by area
-        largest_contour = max(contours, key=cv2.contourArea)
-        largest_contour_area = cv2.contourArea(largest_contour)
-        
-        # Get image dimensions and calculate minimum contour size
-        height, width = image.shape[:2]
-        min_contour_size = height * width * 0.005  # 0.5% of image area
-        
-        # Add debug info
-        print(f"Largest contour area: {largest_contour_area} pixels")
-        print(f"Minimum contour threshold: {min_contour_size} pixels")
-        
-        # Draw all contours on debug image
-        cv2.drawContours(debug_image, contours, -1, (0, 255, 0), 2)
-        
-        # Save debug image
-        debug_dir = os.path.dirname(output_path)
-        debug_path = os.path.join(debug_dir, f"debug_contours_{os.path.basename(output_path)}")
-        cv2.imwrite(debug_path, debug_image)
-        
-        # Check if the largest contour is big enough
-        if largest_contour_area < min_contour_size:
-            error_reason = "No suitable contours found"
-            print(f"Error: {error_reason} (largest contour too small)")
-            cv2.imwrite(str(output_path), image)  # Save original image for debugging
-            return False, error_reason
-        
-        # Find the rotated rectangle (min area rectangle)
-        rect = cv2.minAreaRect(largest_contour)
-        
-        # Get the corner points
-        box = cv2.boxPoints(rect)
-        box = np.int32(box)
-        
-        # Draw the box on the debug image
-        debug_box = image.copy()
-        cv2.drawContours(debug_box, [box], 0, (0, 0, 255), 2)
-        
-        # Save the debug image with the box
-        debug_box_path = os.path.join(debug_dir, f"debug_box_{os.path.basename(output_path)}")
-        cv2.imwrite(debug_box_path, debug_box)
-        
-        # Get width and height of the rectangle
-        width_rect = rect[1][0]
-        height_rect = rect[1][1]
-        
-        # Create a perspective transform to flatten the card
-        # Get the corners in a particular order (top-left, top-right, bottom-right, bottom-left)
-        rect_points = order_points(box.astype("float32"))
-        
-        # Calculate the width and height of the transformed image
-        width_dest = max(int(width_rect), int(height_rect))
-        height_dest = min(int(width_rect), int(height_rect))
-        
-        if width_dest < 10 or height_dest < 10:
-            error_reason = "Detected card is too small"
-            print(f"Error: {error_reason} ({width_dest}x{height_dest})")
-            cv2.imwrite(str(output_path), image)
-            return False, error_reason
-        
-        # Add a border around the image
-        dst_width = width_dest + 2 * border_size
-        dst_height = height_dest + 2 * border_size
-        
-        # Set up destination points with added border
-        dst_points = np.array([
-            [border_size, border_size],                              # Top left
-            [dst_width - border_size, border_size],                  # Top right
-            [dst_width - border_size, dst_height - border_size],     # Bottom right
-            [border_size, dst_height - border_size]                  # Bottom left
-        ], dtype="float32")
-        
-        # Get the perspective transform matrix
-        M = cv2.getPerspectiveTransform(rect_points, dst_points)
-        
-        # Apply the perspective transformation
-        warped = cv2.warpPerspective(image, M, (dst_width, dst_height))
-        
-        # Save the cropped card
-        cv2.imwrite(str(output_path), warped)
-        
-        print(f"Successfully cropped card to {output_path}")
-        return True, None
-        
-    except Exception as e:
-        error_reason = f"Error processing image: {str(e)}"
-        print(f"Exception: {error_reason}")
-        traceback.print_exc()  # Print stack trace
+    # Read the image
+    image = cv2.imread(str(image_path))
+    if image is None:
+        error_reason = "Could not read image"
+        print(f"Error: {error_reason} {image_path}")
         return False, error_reason
+    
+    # Create a copy for output
+    orig = image.copy()
+    
+    # Get image dimensions
+    height, width = image.shape[:2]
+    
+    # Convert to grayscale and blur
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Apply Canny edge detection
+    edged = cv2.Canny(blurred, 50, 200)
+    
+    # Find contours
+    contours = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
+    
+    # Sort contours by area, largest first
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    
+    # If no contours found
+    if not contours:
+        error_reason = "No contours found"
+        print(f"{error_reason} in {image_path}, skipping...")
+        cv2.imwrite(str(output_path), orig)
+        return False, error_reason
+    
+    # Use the largest contour
+    largest_contour = contours[0]
+    
+    # Calculate the minimum area needed for a valid contour (0.5% of the image)
+    min_contour_area = height * width * 0.005
+    
+    # Check if the contour is too small
+    if cv2.contourArea(largest_contour) < min_contour_area:
+        error_reason = "No suitable contours found"
+        print(f"{error_reason} in {image_path}, skipping...")
+        cv2.imwrite(str(output_path), orig)
+        return False, error_reason
+    
+    # Draw the contour on a debug image
+    debug_image = orig.copy()
+    cv2.drawContours(debug_image, [largest_contour], -1, (0, 255, 0), 2)
+    
+    # Save debug image to the debug directory
+    debug_path = str(output_path).replace('/final/', '/debug/')
+    debug_path = debug_path.replace('.jpg', '_debug.jpg').replace('.jpeg', '_debug.jpeg').replace('.png', '_debug.png')
+    cv2.imwrite(debug_path, debug_image)
+    
+    # Approximate the contour
+    peri = cv2.arcLength(largest_contour, True)
+    approx = cv2.approxPolyDP(largest_contour, 0.02 * peri, True)
+    
+    # If the approximation doesn't have 4 points, try to use a bounding rectangle
+    if len(approx) != 4:
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        approx = np.array([
+            [[x, y]],
+            [[x + w, y]],
+            [[x + w, y + h]],
+            [[x, y + h]]
+        ])
+    
+    # Get the 4 corners in the correct order
+    approx = approx.reshape(len(approx), 2)
+    
+    # Order points: top-left, top-right, bottom-right, bottom-left
+    rect = np.zeros((4, 2), dtype=np.float32)
+    
+    # Sum of coordinates - smallest is top-left, largest is bottom-right
+    s = approx.sum(axis=1)
+    rect[0] = approx[np.argmin(s)]  # Top-left
+    rect[2] = approx[np.argmax(s)]  # Bottom-right
+    
+    # Diff of coordinates - smallest is top-right, largest is bottom-left
+    diff = np.diff(approx, axis=1)
+    rect[1] = approx[np.argmin(diff)]  # Top-right
+    rect[3] = approx[np.argmax(diff)]  # Bottom-left
+    
+    # Calculate width and height of the new image
+    width_1 = np.sqrt(((rect[1][0] - rect[0][0]) ** 2) + ((rect[1][1] - rect[0][1]) ** 2))
+    width_2 = np.sqrt(((rect[2][0] - rect[3][0]) ** 2) + ((rect[2][1] - rect[3][1]) ** 2))
+    max_width = max(int(width_1), int(width_2))
+    
+    height_1 = np.sqrt(((rect[0][0] - rect[3][0]) ** 2) + ((rect[0][1] - rect[3][1]) ** 2))
+    height_2 = np.sqrt(((rect[1][0] - rect[2][0]) ** 2) + ((rect[1][1] - rect[2][1]) ** 2))
+    max_height = max(int(height_1), int(height_2))
+    
+    # Ensure reasonable dimensions
+    if max_width < 10 or max_height < 10 or max_width > width * 1.5 or max_height > height * 1.5:
+        error_reason = "Invalid dimensions detected"
+        print(f"{error_reason} in {image_path}, skipping...")
+        cv2.imwrite(str(output_path), debug_image)
+        return False, error_reason
+    
+    # Add border to dimensions (2 * border_size because we add to both sides)
+    output_width = max_width + (2 * border_size)
+    output_height = max_height + (2 * border_size)
+    
+    # Set up destination points for the perspective transformation with added border
+    dst = np.array([
+        [border_size, border_size],                     # Top-left with border
+        [output_width - border_size - 1, border_size],  # Top-right with border
+        [output_width - border_size - 1, output_height - border_size - 1],  # Bottom-right with border
+        [border_size, output_height - border_size - 1]  # Bottom-left with border
+    ], dtype=np.float32)
+    
+    # Compute perspective transform matrix
+    transform_matrix = cv2.getPerspectiveTransform(rect, dst)
+    
+    # Apply perspective transformation to the new dimensions with border
+    warped = cv2.warpPerspective(orig, transform_matrix, (output_width, output_height))
+    
+    # Save the cropped image
+    cv2.imwrite(str(output_path), warped)
+    return True, None
 
-def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False, auto_second_pass=False):
+def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=False):
     """
     Process a zip file containing images.
     
@@ -523,7 +520,6 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
         border_size: Number of pixels to add as border around detected cards
         clean_input: Whether to clean the input directory before extraction
         open_errors_dir: Whether to open the errors directory after processing
-        auto_second_pass: Whether to attempt a second pass for failed images
     """
     # Extract the name of the zip file without extension for using in output paths
     zip_name = os.path.splitext(os.path.basename(zip_path))[0]
@@ -592,15 +588,48 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
         output_path = final_dir / file
         print(f"Processing image {i}/{len(image_files)}: {file}")
         
+        # Get image dimensions for diagnostic purposes
+        try:
+            img = cv2.imread(str(input_path))
+            if img is not None:
+                img_height, img_width = img.shape[:2]
+                print(f"Input image dimensions: {img_width}x{img_height}")
+        except Exception as e:
+            print(f"Error reading image dimensions: {e}")
+        
         # First pass - standard processing
         success, error_reason = crop_largest_object(input_path, output_path, border_size)
         
-        # If first pass failed, attempt a second pass with alternative methods
-        if not success and auto_second_pass:
-            print(f"First pass failed: {error_reason}. Attempting second pass with alternative methods...")
+        # Check the dimensions of the output image
+        cut_off_detected = False
+        try:
+            result_img = cv2.imread(str(output_path))
+            if result_img is not None:
+                res_height, res_width = result_img.shape[:2]
+                print(f"First pass output dimensions: {res_width}x{res_height}")
+                
+                # Check for extremely distorted aspect ratios
+                aspect_ratio = float(res_width) / res_height if res_height > 0 else 0
+                if aspect_ratio < 0.2 or aspect_ratio > 5:
+                    print(f"WARNING: Extreme aspect ratio detected: {aspect_ratio:.4f}")
+                    cut_off_detected = True
+        except Exception as e:
+            print(f"Error checking output dimensions: {e}")
+        
+        # Always attempt second pass for problematic files or when first pass fails
+        if not success or cut_off_detected:
+            reason_msg = f"First pass failed: {error_reason}" if not success else "First pass produced distorted output"
+            print(f"{reason_msg}. Attempting second pass with alternative methods...")
+            
+            # Save a copy of the first pass result for comparison
+            first_pass_output = debug_dir / ("first_pass_" + file)
+            try:
+                shutil.copy2(str(output_path), str(first_pass_output))
+            except Exception as e:
+                print(f"Error saving first pass output: {e}")
             
             # Determine the most likely failure reason and use an appropriate second method
-            if error_reason and "No suitable contours found" in error_reason:
+            if error_reason and "No suitable contours found" in error_reason or cut_off_detected:
                 # Try a more aggressive preprocessing approach
                 second_pass_output = errors_processing_dir / ("second_pass_" + file)
                 success, error_reason = second_pass_processing(input_path, second_pass_output, border_size)
@@ -609,6 +638,15 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
                     print(f"Second pass successful! Using improved result.")
                     # Copy the successful second pass result to the final output
                     shutil.copy2(str(second_pass_output), str(output_path))
+                    
+                    # Check the new dimensions
+                    try:
+                        second_img = cv2.imread(str(output_path))
+                        if second_img is not None:
+                            second_height, second_width = second_img.shape[:2]
+                            print(f"Second pass output dimensions: {second_width}x{second_height}")
+                    except Exception as e:
+                        print(f"Error checking second pass output: {e}")
             
         # If auto-detection is used and we have additional info, use it for categorization
         if not success:
@@ -722,6 +760,7 @@ def process_zip_file(zip_path, border_size=5, clean_input=True, open_errors_dir=
 def second_pass_processing(image_path, output_path, border_size=5):
     """
     Alternative processing method for when the standard approach fails.
+    This method uses multiple approaches to try to detect and crop the card.
     
     Args:
         image_path: Path to the input image
@@ -746,293 +785,410 @@ def second_pass_processing(image_path, output_path, border_size=5):
         height, width = image.shape[:2]
         print(f"DEBUG: Second pass - Image size: {width}x{height}")
         
-        # Try multiple methods and use the best result
-        methods = [
-            "enhanced_preprocessing",
-            "hough_lines",
-            "color_segmentation"
-        ]
+        # Create a directory for debug images
+        debug_dir = os.path.dirname(output_path)
+        debug_base = os.path.basename(output_path)
         
-        best_result = None
-        best_score = 0
-        best_method = None
-        
-        for method in methods:
-            print(f"DEBUG: Second pass - Trying method: {method}")
-            
+        # Create a dedicated second_pass subdirectory inside the debug directory
+        zip_name = os.path.basename(os.path.dirname(str(output_path)))
+        # Fix the directory structure - retrieve the zip name correctly
+        output_path_str = str(output_path)
+        if 'processing' in output_path_str:
+            # If path contains 'processing', extract the correct zip name
+            parts = os.path.normpath(output_path_str).split(os.sep)
             try:
-                if method == "enhanced_preprocessing":
-                    result = try_enhanced_preprocessing(image, orig, border_size, height, width)
-                elif method == "hough_lines":
-                    result = try_hough_lines(image, orig, border_size, height, width)
-                elif method == "color_segmentation":
-                    result = try_color_segmentation(image, orig, border_size, height, width)
+                processing_index = parts.index('processing')
+                if processing_index > 0 and processing_index + 1 < len(parts):
+                    zip_name = parts[processing_index - 1]  # Get the directory name before 'processing'
+            except ValueError:
+                # 'processing' not found in path
+                pass
+        
+        second_pass_debug_dir = os.path.join("output", "debug", zip_name, "second_pass")
+        os.makedirs(second_pass_debug_dir, exist_ok=True)
+        
+        # Print debug info for directory structure
+        print(f"DEBUG: Saving second pass debug images to {second_pass_debug_dir}")
+        
+        # Save the original image for reference
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"original_{debug_base}"), orig)
+        
+        # Try multiple approaches to find the best card detection
+        best_contour = None
+        best_contour_area = 0
+        
+        # Approach -1: Try rotation correction first for skewed cards
+        # This approach is specifically designed for cards that appear skewed but are otherwise visible
+        # We'll try to detect lines in the image and rotate it to align with the dominant orientation
+        rotation_angle = None
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"rotation_canny_{debug_base}"), edges)
+            
+            # Use probabilistic Hough transform to detect lines
+            lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=20)
+            
+            if lines is not None and len(lines) > 0:
+                print(f"DEBUG: Found {len(lines)} lines for rotation analysis")
                 
-                if result and result.get("success"):
-                    # Score the result (higher is better)
-                    score = result.get("score", 0)
-                    print(f"DEBUG: Second pass - Method {method} succeeded with score {score}")
+                # Draw detected lines on a copy of the image
+                line_image = orig.copy()
+                
+                # Calculate angles of lines
+                angles = []
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     
-                    if score > best_score:
-                        best_result = result
-                        best_score = score
-                        best_method = method
-                else:
-                    print(f"DEBUG: Second pass - Method {method} failed")
-            except Exception as e:
-                print(f"DEBUG: Second pass - Method {method} raised exception: {str(e)}")
+                    # Calculate angle of line
+                    if x2 - x1 != 0:  # Avoid division by zero
+                        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                        
+                        # Normalize angle to be between -45 and 45 degrees
+                        # (we only care about rotation within this range for cards)
+                        while angle < -45:
+                            angle += 90
+                        while angle > 45:
+                            angle -= 90
+                        
+                        # Only consider angles that are close to horizontal or vertical
+                        if abs(angle) < 45:
+                            angles.append(angle)
+                
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"rotation_lines_{debug_base}"), line_image)
+                
+                if angles:
+                    # Calculate the most common angle using a histogram
+                    hist, bins = np.histogram(angles, bins=90, range=(-45, 45))
+                    dominant_angle_idx = np.argmax(hist)
+                    rotation_angle = (bins[dominant_angle_idx] + bins[dominant_angle_idx + 1]) / 2
+                    
+                    print(f"DEBUG: Dominant rotation angle: {rotation_angle:.2f} degrees")
+                    
+                    # Draw the rotation angle on the image
+                    angle_image = orig.copy()
+                    cv2.putText(angle_image, f"Rotation: {rotation_angle:.2f} degrees", 
+                                (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    
+                    # Draw a line showing the rotation
+                    center = (width // 2, height // 2)
+                    line_length = min(width, height) // 4
+                    end_point = (
+                        int(center[0] + line_length * np.cos(np.radians(rotation_angle))),
+                        int(center[1] + line_length * np.sin(np.radians(rotation_angle)))
+                    )
+                    cv2.line(angle_image, center, end_point, (0, 0, 255), 3)
+                    cv2.imwrite(os.path.join(second_pass_debug_dir, f"rotation_angle_{debug_base}"), angle_image)
+                    
+                    # If the rotation angle is significant, rotate the image
+                    if abs(rotation_angle) > 1.0:  # Only rotate if angle is more than 1 degree
+                        # Get rotation matrix
+                        rotation_matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
+                        
+                        # Determine new image dimensions
+                        abs_cos = abs(rotation_matrix[0, 0])
+                        abs_sin = abs(rotation_matrix[0, 1])
+                        new_width = int(height * abs_sin + width * abs_cos)
+                        new_height = int(height * abs_cos + width * abs_sin)
+                        
+                        # Adjust the rotation matrix
+                        rotation_matrix[0, 2] += (new_width / 2) - center[0]
+                        rotation_matrix[1, 2] += (new_height / 2) - center[1]
+                        
+                        # Perform the rotation
+                        rotated_image = cv2.warpAffine(orig, rotation_matrix, (new_width, new_height))
+                        cv2.imwrite(os.path.join(second_pass_debug_dir, f"rotated_{debug_base}"), rotated_image)
+                        
+                        # Use this rotated image for subsequent processing
+                        image = rotated_image
+                        height, width = image.shape[:2]
+                        orig = image.copy()
+                        print("DEBUG: Applied rotation correction")
+        except Exception as e:
+            print(f"DEBUG: Error in rotation correction: {e}")
         
-        if best_result:
-            print(f"DEBUG: Second pass - Using best method: {best_method} with score {best_score}")
-            warped = best_result["result"]
-            
-            # Save debug image
-            debug_dir = os.path.dirname(output_path)
-            debug_path = os.path.join(debug_dir, f"debug_{best_method}_{os.path.basename(output_path)}")
-            cv2.imwrite(debug_path, best_result.get("debug_image", warped))
-            
-            # Save the cropped image
-            cv2.imwrite(str(output_path), warped)
-            print("DEBUG: Second pass successful!")
-            return True, None
+        # Special handling for severe distortions - Check for past distortion first
+        # If we had a severely cut off card in the first pass, let's try a different approach
+        # by focusing on detecting large rectangular shapes
         
-        print("DEBUG: Second pass - All methods failed")
-        return False, "All second-pass methods failed"
+        # Approach 0: Specialized aspect ratio-aware detection
+        # This approach is specifically designed for cards that get severely distorted
+        # Focus on finding rectangular shapes with reasonable aspect ratios
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (9, 9), 0)  # Stronger blur to reduce noise
         
-    except Exception as e:
-        error_reason = f"Error in second pass: {str(e)}"
-        print(error_reason)
-        return False, error_reason
-
-def try_enhanced_preprocessing(image, orig, border_size, height, width):
-    """Enhanced preprocessing method for second pass"""
-    # Convert to grayscale with CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced_gray = clahe.apply(gray)
-    
-    # Apply stronger blurring to reduce noise
-    blurred = cv2.GaussianBlur(enhanced_gray, (7, 7), 0)
-    
-    # Use a combination of edge detection methods
-    canny_edges = cv2.Canny(blurred, 30, 150)
-    
-    # Dilate to connect edge fragments
-    kernel = np.ones((5, 5), np.uint8)
-    dilated_edges = cv2.dilate(canny_edges, kernel, iterations=2)
-    closed_edges = cv2.morphologyEx(dilated_edges, cv2.MORPH_CLOSE, kernel, iterations=3)
-    
-    # Find contours in the enhanced edge map
-    contours = cv2.findContours(closed_edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = imutils.grab_contours(contours)
-    
-    # Find the largest contour by area
-    if not contours:
-        return None
-    
-    best_contour = max(contours, key=cv2.contourArea)
-    best_contour_area = cv2.contourArea(best_contour)
-    
-    # Use a more lenient threshold for the second pass
-    min_contour_threshold = (height * width * 0.003)  # 0.3% instead of 0.5%
-    
-    if best_contour_area < min_contour_threshold:
-        return None
-    
-    # Draw the contour on a debug image
-    debug_image = orig.copy()
-    cv2.drawContours(debug_image, [best_contour], -1, (0, 255, 0), 2)
-    
-    # Alternative approach 2: Use a more aggressive approximation strategy
-    # Try convex hull first
-    hull = cv2.convexHull(best_contour)
-    hull_peri = cv2.arcLength(hull, True)
-    
-    # Try a wider range of epsilon values
-    best_approx = None
-    for epsilon_factor in [0.01, 0.02, 0.03, 0.05, 0.08, 0.1, 0.15, 0.2]:
-        approx = cv2.approxPolyDP(hull, epsilon_factor * hull_peri, True)
-        if len(approx) == 4:
-            best_approx = approx
-            print(f"DEBUG: Enhanced preprocessing - Found good 4-point hull approximation with epsilon {epsilon_factor}")
-            break
-    
-    # If no good approximation, use a simple bounding rectangle
-    if best_approx is None or len(best_approx) != 4:
-        x, y, w, h = cv2.boundingRect(hull)
-        print(f"DEBUG: Enhanced preprocessing - Using bounding rectangle: x={x}, y={y}, w={w}, h={h}")
-        best_approx = np.array([
-            [x, y],
-            [x + w, y],
-            [x + w, y + h],
-            [x, y + h]
-        ])
-    
-    # Reshape for perspective transform
-    best_approx = np.array(best_approx).reshape(4, 2)
-    
-    # Order points: top-left, top-right, bottom-right, bottom-left
-    rect = np.zeros((4, 2), dtype=np.float32)
-    
-    # Sum of coordinates - smallest is top-left, largest is bottom-right
-    s = best_approx.sum(axis=1)
-    rect[0] = best_approx[np.argmin(s)]  # Top-left
-    rect[2] = best_approx[np.argmax(s)]  # Bottom-right
-    
-    # Diff of coordinates - smallest is top-right, largest is bottom-left
-    diff = np.diff(best_approx, axis=1)
-    rect[1] = best_approx[np.argmin(diff)]  # Top-right
-    rect[3] = best_approx[np.argmax(diff)]  # Bottom-left
-    
-    # Calculate width and height of the new image
-    width_1 = np.sqrt(((rect[1][0] - rect[0][0]) ** 2) + ((rect[1][1] - rect[0][1]) ** 2))
-    width_2 = np.sqrt(((rect[2][0] - rect[3][0]) ** 2) + ((rect[2][1] - rect[3][1]) ** 2))
-    max_width = max(int(width_1), int(width_2))
-    
-    height_1 = np.sqrt(((rect[0][0] - rect[3][0]) ** 2) + ((rect[0][1] - rect[3][1]) ** 2))
-    height_2 = np.sqrt(((rect[1][0] - rect[2][0]) ** 2) + ((rect[1][1] - rect[2][1]) ** 2))
-    max_height = max(int(height_1), int(height_2))
-    
-    # Ensure reasonable dimensions
-    if max_width < 10 or max_height < 10 or max_width > width * 1.5 or max_height > height * 1.5:
-        return None
-    
-    # Add border to dimensions
-    output_width = max_width + (2 * border_size)
-    output_height = max_height + (2 * border_size)
-    
-    # Set up destination points with added border
-    dst = np.array([
-        [border_size, border_size],
-        [output_width - border_size - 1, border_size],
-        [output_width - border_size - 1, output_height - border_size - 1],
-        [border_size, output_height - border_size - 1]
-    ], dtype=np.float32)
-    
-    # Compute perspective transform matrix
-    transform_matrix = cv2.getPerspectiveTransform(rect, dst)
-    
-    # Apply perspective transformation
-    warped = cv2.warpPerspective(orig, transform_matrix, (output_width, output_height))
-    
-    # Calculate a score for this method - contour area and approximation quality
-    contour_ratio = best_contour_area / (height * width)
-    score = 50 + (contour_ratio * 100)  # Base score plus ratio-based component
-    
-    return {
-        "success": True,
-        "result": warped,
-        "debug_image": debug_image,
-        "score": score
-    }
-
-def try_hough_lines(image, orig, border_size, height, width):
-    """Use Hough line detection to find card edges"""
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Apply blur and edge detection
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
-    
-    # Use probabilistic Hough transform to find lines
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, minLineLength=max(width, height)/10, maxLineGap=20)
-    
-    if lines is None or len(lines) < 4:
-        print("DEBUG: Hough lines - Not enough lines detected")
-        return None
-    
-    # Create debug image
-    debug_image = orig.copy()
-    
-    # Draw all lines
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        cv2.line(debug_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    
-    # Group lines into horizontal and vertical clusters
-    horizontal_lines = []
-    vertical_lines = []
-    
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
+        # Apply a more aggressive edge detection
+        edged = cv2.Canny(blurred, 20, 80)  # Lower thresholds to catch more edges
         
-        # If line is more horizontal than vertical
-        if dx > dy:
-            horizontal_lines.append(line)
+        # Save edge detection result for debugging
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"edges_{debug_base}"), edged)
+        
+        # Dilate to connect edge fragments that might be broken
+        kernel = np.ones((5, 5), np.uint8)
+        dilated = cv2.dilate(edged, kernel, iterations=2)
+        closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, kernel, iterations=3)
+        
+        # Save dilated edges for debugging
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"dilated_edges_{debug_base}"), closed)
+        
+        # Find contours in the enhanced edge map
+        contours = cv2.findContours(closed.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = imutils.grab_contours(contours)
+        
+        # Save all contours on a debug image
+        contour_img = orig.copy()
+        cv2.drawContours(contour_img, contours, -1, (0, 255, 0), 2)
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"all_contours_{debug_base}"), contour_img)
+        
+        # Handle case where no contours are found
+        if not contours:
+            print("DEBUG: No contours found in specialized detection")
         else:
-            vertical_lines.append(line)
-    
-    # Need at least 2 horizontal and 2 vertical lines for a quadrilateral
-    if len(horizontal_lines) < 2 or len(vertical_lines) < 2:
-        print("DEBUG: Hough lines - Need at least 2 horizontal and 2 vertical lines")
-        return None
-    
-    # Find two best horizontal and two best vertical lines
-    # Sort horizontal lines by y-coordinate (top to bottom)
-    horizontal_lines.sort(key=lambda line: (line[0][1] + line[0][3]) / 2)
-    top_line = horizontal_lines[0][0]
-    bottom_line = horizontal_lines[-1][0]
-    
-    # Sort vertical lines by x-coordinate (left to right)
-    vertical_lines.sort(key=lambda line: (line[0][0] + line[0][2]) / 2)
-    left_line = vertical_lines[0][0]
-    right_line = vertical_lines[-1][0]
-    
-    # Draw the selected lines in a different color
-    cv2.line(debug_image, (top_line[0], top_line[1]), (top_line[2], top_line[3]), (255, 0, 0), 3)
-    cv2.line(debug_image, (bottom_line[0], bottom_line[1]), (bottom_line[2], bottom_line[3]), (255, 0, 0), 3)
-    cv2.line(debug_image, (left_line[0], left_line[1]), (left_line[2], left_line[3]), (0, 0, 255), 3)
-    cv2.line(debug_image, (right_line[0], right_line[1]), (right_line[2], right_line[3]), (0, 0, 255), 3)
-    
-    # Calculate intersections to find corners
-    def line_intersection(line1, line2):
-        # Convert to the form ax + by = c
-        a1 = line1[3] - line1[1]
-        b1 = line1[0] - line1[2]
-        c1 = a1 * line1[0] + b1 * line1[1]
+            # Sort by area but filter based on aspect ratio
+            good_contours = []
+            for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+                # Calculate aspect ratio
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = float(w) / h if h > 0 else 0
+                
+                # Draw this contour on a separate image with the aspect ratio
+                contour_debug = orig.copy()
+                cv2.drawContours(contour_debug, [contour], -1, (0, 255, 0), 2)
+                cv2.rectangle(contour_debug, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                cv2.putText(contour_debug, f"AR: {aspect_ratio:.2f}, Area: {cv2.contourArea(contour)}", 
+                           (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"contour_{len(good_contours)}_{debug_base}"), contour_debug)
+                
+                # Most cards have aspect ratios between 0.5 and 2.0
+                # (height might be 1-2x width, or width might be 1-2x height)
+                # For problematic cards with extreme distortion, let's be more lenient
+                if 0.25 <= aspect_ratio <= 4.0:
+                    area = cv2.contourArea(contour)
+                    if area > height * width * 0.05:  # Must be at least 5% of image
+                        good_contours.append(contour)
+                        if area > best_contour_area:
+                            best_contour_area = area
+                            best_contour = contour
+                            print(f"DEBUG: Found good aspect ratio contour: {aspect_ratio:.2f}, area: {area}")
+            
+            # If we found good contours, save them for debugging
+            if good_contours:
+                good_contour_img = orig.copy()
+                cv2.drawContours(good_contour_img, good_contours, -1, (0, 255, 0), 2)
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"good_contours_{debug_base}"), good_contour_img)
         
-        a2 = line2[3] - line2[1]
-        b2 = line2[0] - line2[2]
-        c2 = a2 * line2[0] + b2 * line2[1]
+        # If we found a good contour with reasonable aspect ratio, we'll use that
+        # Otherwise, continue with other approaches
         
-        determinant = a1 * b2 - a2 * b1
+        # Approach 1: Canny edge detection with different thresholds
+        # Only run if we don't have a good contour yet
+        if best_contour is None:
+            for idx, (low, high) in enumerate([(30, 150), (50, 200), (20, 100)]):
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                edged = cv2.Canny(blurred, low, high)
+                
+                # Save edge detection result for debugging
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"canny{idx+1}_{debug_base}"), edged)
+                
+                contours = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contours = imutils.grab_contours(contours)
+                
+                # Save contours for debugging
+                if contours:
+                    canny_contours = orig.copy()
+                    cv2.drawContours(canny_contours, contours, -1, (0, 255, 0), 2)
+                    cv2.imwrite(os.path.join(second_pass_debug_dir, f"canny{idx+1}_contours_{debug_base}"), canny_contours)
+                
+                if contours:
+                    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+                        area = cv2.contourArea(contour)
+                        if area > best_contour_area:
+                            best_contour_area = area
+                            best_contour = contour
         
-        if determinant == 0:
-            # Lines are parallel
-            return None
+        # Approach 6: Last resort for extremely distorted images
+        # Try using a fixed card-sized rectangle in the center of the image
+        if best_contour is None:
+            print("DEBUG: All detection methods failed, using fixed-size card rectangle in center")
+            # Use a standard card aspect ratio of 2.5 x 3.5 inches
+            if width > height:
+                # Landscape image, card is likely in center
+                card_width = int(min(width * 0.8, height * (2.5/3.5) * 1.2))
+                card_height = int(card_width * (3.5/2.5))
+            else:
+                # Portrait image, card is likely in center
+                card_height = int(min(height * 0.8, width * (3.5/2.5) * 1.2))
+                card_width = int(card_height * (2.5/3.5))
+            
+            # Center the card in the image
+            x = (width - card_width) // 2
+            y = (height - card_height) // 2
+            
+            # Create a rectangle contour
+            rect_contour = np.array([
+                [[x, y]],
+                [[x + card_width, y]],
+                [[x + card_width, y + card_height]],
+                [[x, y + card_height]]
+            ], dtype=np.int32)
+            
+            best_contour = rect_contour
+            best_contour_area = card_width * card_height
+            
+            # Save the guessed rectangle
+            fixed_rect_img = orig.copy()
+            cv2.drawContours(fixed_rect_img, [best_contour], -1, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"fixed_rectangle_{debug_base}"), fixed_rect_img)
+            
+            print(f"DEBUG: Created fixed rectangle: w={card_width}, h={card_height}, area={best_contour_area}")
         
-        x = (b2 * c1 - b1 * c2) / determinant
-        y = (a1 * c2 - a2 * c1) / determinant
+        # If still no good contour found
+        if best_contour is None or best_contour_area < (height * width * 0.003):  # Even lower threshold: 0.3%
+            error_reason = "No suitable contours found"
+            print(f"{error_reason} in {image_path}, skipping...")
+            cv2.imwrite(str(output_path), orig)
+            return False, error_reason
         
-        return (int(x), int(y))
-    
-    # Find the four corners
-    try:
-        top_left = line_intersection(top_line, left_line)
-        top_right = line_intersection(top_line, right_line)
-        bottom_right = line_intersection(bottom_line, right_line)
-        bottom_left = line_intersection(bottom_line, left_line)
+        # Draw the contour on a debug image
+        debug_image = orig.copy()
+        cv2.drawContours(debug_image, [best_contour], -1, (0, 255, 0), 2)
         
-        if None in [top_left, top_right, bottom_right, bottom_left]:
-            print("DEBUG: Hough lines - One or more intersections failed")
-            return None
+        # If we detected a rotation angle, add it to the debug image
+        if rotation_angle is not None:
+            cv2.putText(debug_image, f"Rotation corrected: {rotation_angle:.2f} degrees", 
+                       (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         
-        # Draw corner points
-        for corner in [top_left, top_right, bottom_right, bottom_left]:
-            cv2.circle(debug_image, corner, 10, (0, 0, 255), -1)
+        # Save best contour for debugging
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"best_contour_{debug_base}"), debug_image)
         
-        # Create the rectangle for perspective transform
-        rect = np.array([
-            [top_left[0], top_left[1]],
-            [top_right[0], top_right[1]],
-            [bottom_right[0], bottom_right[1]],
-            [bottom_left[0], bottom_left[1]]
-        ], dtype=np.float32)
+        # Save debug image to the processing directory
+        debug_path = str(output_path).replace('second_pass_', 'second_pass_debug_')
+        cv2.imwrite(debug_path, debug_image)
         
-        # Calculate width and height
+        # Approximate the contour
+        peri = cv2.arcLength(best_contour, True)
+        
+        # Try multiple epsilon values for approximation
+        best_approx = None
+        for epsilon_factor in [0.01, 0.02, 0.03, 0.05, 0.08, 0.1]:
+            approx = cv2.approxPolyDP(best_contour, epsilon_factor * peri, True)
+            
+            # Save the approximation for debugging
+            approx_img = orig.copy()
+            cv2.drawContours(approx_img, [approx], -1, (0, 255, 0), 2)
+            cv2.putText(approx_img, f"Epsilon: {epsilon_factor}, Points: {len(approx)}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"approx_{epsilon_factor}_{debug_base}"), approx_img)
+            
+            if len(approx) == 4:
+                best_approx = approx
+                break
+        
+        # If we couldn't find a good 4-point approximation, try convex hull
+        if best_approx is None or len(best_approx) != 4:
+            hull = cv2.convexHull(best_contour)
+            
+            # Save the hull for debugging
+            hull_img = orig.copy()
+            cv2.drawContours(hull_img, [hull], -1, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"hull_{debug_base}"), hull_img)
+            
+            hull_peri = cv2.arcLength(hull, True)
+            for epsilon_factor in [0.01, 0.02, 0.03, 0.05, 0.08, 0.1, 0.15, 0.2]:
+                approx = cv2.approxPolyDP(hull, epsilon_factor * hull_peri, True)
+                print(f"DEBUG: Second pass - Hull epsilon {epsilon_factor} gives {len(approx)} points")
+                
+                # Save hull approximation
+                hull_approx_img = orig.copy()
+                cv2.drawContours(hull_approx_img, [approx], -1, (0, 255, 0), 2)
+                cv2.putText(hull_approx_img, f"Hull Epsilon: {epsilon_factor}, Points: {len(approx)}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"hull_approx_{epsilon_factor}_{debug_base}"), hull_approx_img)
+                
+                if len(approx) == 4:
+                    best_approx = approx
+                    print(f"DEBUG: Second pass - Found good 4-point hull approximation with epsilon {epsilon_factor}")
+                    break
+        
+        # If still no good approximation, use a bounding rectangle
+        if best_approx is None or len(best_approx) != 4:
+            x, y, w, h = cv2.boundingRect(best_contour)
+            
+            # Check for extreme aspect ratios that indicate a problem
+            aspect_ratio = float(w) / h if h > 0 else 0
+            print(f"DEBUG: Bounding rect aspect ratio: {aspect_ratio:.4f}, w={w}, h={h}")
+            
+            # Save the bounding rectangle
+            rect_img = orig.copy()
+            cv2.rectangle(rect_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(rect_img, f"Bounding Rect AR: {aspect_ratio:.2f}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"bounding_rect_{debug_base}"), rect_img)
+            
+            # If we have an extreme aspect ratio, try to correct it
+            if aspect_ratio < 0.1 or aspect_ratio > 10:
+                print("DEBUG: Extreme aspect ratio detected, attempting correction")
+                # We've detected a severely distorted rectangle
+                # Instead of using this bounding rect, let's use a more reasonable proportion
+                
+                # For a typical card, use a standard aspect ratio of 2.5/3.5 ≈ 0.714
+                # This is the ratio of a standard trading card
+                if w > h:
+                    # Width is larger, adjust height
+                    new_h = int(w * (3.5/2.5))
+                    # Center it vertically
+                    new_y = max(y - (new_h - h) // 2, 0)
+                    h = min(new_h, height - new_y)  # Don't exceed image bounds
+                else:
+                    # Height is larger, adjust width
+                    new_w = int(h * (2.5/3.5))
+                    # Center it horizontally
+                    new_x = max(x - (new_w - w) // 2, 0)
+                    w = min(new_w, width - new_x)  # Don't exceed image bounds
+                    
+                print(f"DEBUG: Corrected to w={w}, h={h}")
+                
+                # Save the corrected rectangle
+                corrected_rect_img = orig.copy()
+                cv2.rectangle(corrected_rect_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.putText(corrected_rect_img, f"Corrected AR: {float(w)/h:.2f}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                cv2.imwrite(os.path.join(second_pass_debug_dir, f"corrected_rect_{debug_base}"), corrected_rect_img)
+            
+            best_approx = np.array([
+                [[x, y]],
+                [[x + w, y]],
+                [[x + w, y + h]],
+                [[x, y + h]]
+            ])
+        
+        # Get the 4 corners in the correct order
+        best_approx = best_approx.reshape(len(best_approx), 2)
+        
+        # Order points: top-left, top-right, bottom-right, bottom-left
+        rect = np.zeros((4, 2), dtype=np.float32)
+        
+        # Sum of coordinates - smallest is top-left, largest is bottom-right
+        s = best_approx.sum(axis=1)
+        rect[0] = best_approx[np.argmin(s)]  # Top-left
+        rect[2] = best_approx[np.argmax(s)]  # Bottom-right
+        
+        # Diff of coordinates - smallest is top-right, largest is bottom-left
+        diff = np.diff(best_approx, axis=1)
+        rect[1] = best_approx[np.argmin(diff)]  # Top-right
+        rect[3] = best_approx[np.argmax(diff)]  # Bottom-left
+        
+        # Draw the ordered points on a debug image
+        ordered_points_img = orig.copy()
+        for i, point in enumerate(rect):
+            cv2.circle(ordered_points_img, tuple(point.astype(int)), 5, (0, 0, 255), -1)
+            cv2.putText(ordered_points_img, str(i), tuple(point.astype(int) + 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"ordered_points_{debug_base}"), ordered_points_img)
+        
+        # Calculate width and height of the new image
         width_1 = np.sqrt(((rect[1][0] - rect[0][0]) ** 2) + ((rect[1][1] - rect[0][1]) ** 2))
         width_2 = np.sqrt(((rect[2][0] - rect[3][0]) ** 2) + ((rect[2][1] - rect[3][1]) ** 2))
         max_width = max(int(width_1), int(width_2))
@@ -1041,12 +1197,46 @@ def try_hough_lines(image, orig, border_size, height, width):
         height_2 = np.sqrt(((rect[1][0] - rect[2][0]) ** 2) + ((rect[1][1] - rect[2][1]) ** 2))
         max_height = max(int(height_1), int(height_2))
         
-        # Check reasonable dimensions
-        if max_width < 10 or max_height < 10 or max_width > width * 1.5 or max_height > height * 1.5:
-            print("DEBUG: Hough lines - Unreasonable dimensions")
-            return None
+        print(f"DEBUG: Second pass - Final rect dimensions: width={max_width}, height={max_height}")
         
-        # Add border
+        # Check for excessive distortion in the perspective transformation
+        aspect_ratio = float(max_width) / max_height if max_height > 0 else 0
+        print(f"DEBUG: Final perspective aspect ratio: {aspect_ratio:.4f}")
+        
+        # If the aspect ratio is extreme, we likely have a bad perspective transform
+        if aspect_ratio < 0.2 or aspect_ratio > 5:
+            print("DEBUG: Extreme aspect ratio in perspective transformation, attempting correction")
+            
+            # Standard trading card aspect ratio is 2.5" x 3.5" ≈ 0.714
+            # We'll adjust to approximate this
+            if max_width > max_height:
+                max_height = int(max_width * (3.5/2.5))
+            else:
+                max_width = int(max_height * (2.5/3.5))
+                
+            print(f"DEBUG: Corrected dimensions: width={max_width}, height={max_height}")
+            
+            # Save the corrected dimensions for debugging
+            corrected_dimensions_img = orig.copy()
+            cv2.putText(corrected_dimensions_img, f"Corrected Size: {max_width}x{max_height}, AR: {float(max_width)/max_height:.2f}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.imwrite(os.path.join(second_pass_debug_dir, f"corrected_dimensions_{debug_base}"), corrected_dimensions_img)
+        
+        # Ensure reasonable dimensions
+        if max_width < 10 or max_height < 10:
+            error_reason = "Invalid dimensions detected (too small)"
+            print(f"Second pass: {error_reason} in {image_path}, skipping...")
+            cv2.imwrite(str(output_path), debug_image)
+            return False, error_reason
+            
+        # Don't allow excessive expansion but be more lenient for second pass
+        if max_width > width * 2 or max_height > height * 2:
+            error_reason = "Invalid dimensions detected (too large)"
+            print(f"Second pass: {error_reason} in {image_path}, skipping...")
+            cv2.imwrite(str(output_path), debug_image)
+            return False, error_reason
+        
+        # Add border to dimensions
         output_width = max_width + (2 * border_size)
         output_height = max_height + (2 * border_size)
         
@@ -1064,279 +1254,62 @@ def try_hough_lines(image, orig, border_size, height, width):
         # Apply perspective transformation
         warped = cv2.warpPerspective(orig, transform_matrix, (output_width, output_height))
         
-        # Calculate score based on line detection quality
-        line_count_score = min(20, len(lines))
-        corner_distance_score = 0
+        # Save the cropped image
+        cv2.imwrite(str(output_path), warped)
         
-        # Check if corners form a reasonable quadrilateral
-        # Score based on how close the rectangle is to a perfect rectangle
-        width_ratio = min(width_1, width_2) / max(width_1, width_2) if max(width_1, width_2) > 0 else 0
-        height_ratio = min(height_1, height_2) / max(height_1, height_2) if max(height_1, height_2) > 0 else 0
+        # Save a copy to debug dir
+        cv2.imwrite(os.path.join(second_pass_debug_dir, f"final_warped_{debug_base}"), warped)
         
-        corner_distance_score = (width_ratio + height_ratio) * 50
+        print("DEBUG: Second pass successful!")
+        return True, None
         
-        score = 40 + line_count_score + corner_distance_score
-        
-        return {
-            "success": True,
-            "result": warped,
-            "debug_image": debug_image,
-            "score": score
-        }
-    
     except Exception as e:
-        print(f"DEBUG: Hough lines - Error during processing: {str(e)}")
-        return None
-
-def try_color_segmentation(image, orig, border_size, height, width):
-    """Use color segmentation to isolate the card from background"""
-    # Convert to different color spaces
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    
-    # Create a mask using K-means clustering
-    # Flatten the image and convert to floats
-    pixels = image.reshape((-1, 3)).astype(np.float32)
-    
-    # Define criteria and apply kmeans
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-    k = 4  # Number of clusters
-    _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-    
-    # Convert back to uint8
-    centers = np.uint8(centers)
-    
-    # Map the labels to their respective centers
-    segmented_image = centers[labels.flatten()]
-    segmented_image = segmented_image.reshape(image.shape)
-    
-    # Create debug image
-    debug_image = segmented_image.copy()
-    
-    # Create binary masks for each cluster
-    masks = []
-    for i in range(k):
-        mask = np.zeros(labels.shape, dtype=np.uint8)
-        mask[labels == i] = 255
-        mask = mask.reshape(height, width)
-        masks.append(mask)
-    
-    # Find the mask that most likely represents the card
-    best_mask = None
-    best_score = -1
-    
-    for i, mask in enumerate(masks):
-        # Use morphological operations to clean up mask
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        
-        # Find contours
-        contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = imutils.grab_contours(contours)
-        
-        if not contours:
-            continue
-        
-        # Get the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        contour_area = cv2.contourArea(largest_contour)
-        
-        # Skip if too small
-        if contour_area < (width * height * 0.05):
-            continue
-        
-        # Score based on how rectangular the contour is
-        rect_area = cv2.contourArea(cv2.boxPoints(cv2.minAreaRect(largest_contour)).astype(np.int32))
-        rectangularity = contour_area / rect_area if rect_area > 0 else 0
-        
-        # Score based on area and rectangularity
-        score = (contour_area / (width * height)) * 50 + rectangularity * 50
-        
-        if score > best_score:
-            best_score = score
-            best_mask = mask
-            best_contour = largest_contour
-    
-    if best_mask is None:
-        print("DEBUG: Color segmentation - No good mask found")
-        return None
-    
-    # Draw the best contour on the debug image
-    cv2.drawContours(debug_image, [best_contour], -1, (0, 255, 0), 3)
-    
-    # Try to find a quadrilateral approximation
-    epsilon = 0.05 * cv2.arcLength(best_contour, True)
-    approx = cv2.approxPolyDP(best_contour, epsilon, True)
-    
-    # If we don't get exactly 4 points, try to adjust epsilon
-    if len(approx) != 4:
-        # Try different epsilon values
-        for factor in [0.02, 0.03, 0.07, 0.1]:
-            epsilon = factor * cv2.arcLength(best_contour, True)
-            approx = cv2.approxPolyDP(best_contour, epsilon, True)
-            if len(approx) == 4:
-                break
-    
-    # If we still don't have 4 points, use the bounding rectangle
-    if len(approx) != 4:
-        print(f"DEBUG: Color segmentation - Using bounding rectangle (approx had {len(approx)} points)")
-        rect = cv2.minAreaRect(best_contour)
-        box = cv2.boxPoints(rect)
-        approx = np.int32(box)
-    
-    # Draw the approximation on the debug image
-    cv2.drawContours(debug_image, [approx], -1, (255, 0, 0), 3)
-    
-    # Order points: top-left, top-right, bottom-right, bottom-left
-    rect = np.zeros((4, 2), dtype=np.float32)
-    
-    # Convert approx to the right format
-    approx = approx.reshape(len(approx), 2)
-    
-    # Sum of coordinates - smallest is top-left, largest is bottom-right
-    s = approx.sum(axis=1)
-    rect[0] = approx[np.argmin(s)]  # Top-left
-    rect[2] = approx[np.argmax(s)]  # Bottom-right
-    
-    # Diff of coordinates - smallest is top-right, largest is bottom-left
-    diff = np.diff(approx, axis=1)
-    rect[1] = approx[np.argmin(diff)]  # Top-right
-    rect[3] = approx[np.argmax(diff)]  # Bottom-left
-    
-    # Calculate width and height of the new image
-    width_1 = np.sqrt(((rect[1][0] - rect[0][0]) ** 2) + ((rect[1][1] - rect[0][1]) ** 2))
-    width_2 = np.sqrt(((rect[2][0] - rect[3][0]) ** 2) + ((rect[2][1] - rect[3][1]) ** 2))
-    max_width = max(int(width_1), int(width_2))
-    
-    height_1 = np.sqrt(((rect[0][0] - rect[3][0]) ** 2) + ((rect[0][1] - rect[3][1]) ** 2))
-    height_2 = np.sqrt(((rect[1][0] - rect[2][0]) ** 2) + ((rect[1][1] - rect[2][1]) ** 2))
-    max_height = max(int(height_1), int(height_2))
-    
-    # Check reasonable dimensions
-    if max_width < 10 or max_height < 10 or max_width > width * 1.5 or max_height > height * 1.5:
-        print(f"DEBUG: Color segmentation - Unreasonable dimensions: {max_width}x{max_height}")
-        return None
-    
-    # Add border
-    output_width = max_width + (2 * border_size)
-    output_height = max_height + (2 * border_size)
-    
-    # Set up destination points with added border
-    dst = np.array([
-        [border_size, border_size],
-        [output_width - border_size - 1, border_size],
-        [output_width - border_size - 1, output_height - border_size - 1],
-        [border_size, output_height - border_size - 1]
-    ], dtype=np.float32)
-    
-    # Compute perspective transform matrix
-    transform_matrix = cv2.getPerspectiveTransform(rect, dst)
-    
-    # Apply perspective transformation
-    warped = cv2.warpPerspective(orig, transform_matrix, (output_width, output_height))
-    
-    # Score based on area and rectangularity
-    rectangularity = contour_area / (max_width * max_height) if (max_width * max_height) > 0 else 0
-    score = 30 + (rectangularity * 80)
-    
-    return {
-        "success": True,
-        "result": warped,
-        "debug_image": debug_image,
-        "score": score
-    }
-
-def order_points(pts):
-    """
-    Order points in clockwise order: top-left, top-right, bottom-right, bottom-left.
-    
-    Args:
-        pts: numpy array of shape (4, 2)
-        
-    Returns:
-        numpy array of shape (4, 2) with ordered points
-    """
-    # Initialize result array in the same type as input
-    rect = np.zeros((4, 2), dtype=pts.dtype)
-    
-    # Sum of coordinates - smallest is top-left, largest is bottom-right
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]  # Top-left
-    rect[2] = pts[np.argmax(s)]  # Bottom-right
-    
-    # Diff of coordinates - smallest is top-right, largest is bottom-left
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]  # Top-right
-    rect[3] = pts[np.argmax(diff)]  # Bottom-left
-    
-    return rect
+        import traceback
+        error_reason = f"Error in second pass: {str(e)}"
+        print(error_reason)
+        traceback.print_exc()
+        return False, error_reason
 
 def main():
-    """Main function to process command line arguments."""
-    parser = argparse.ArgumentParser(description='Crop trading cards from images')
-    parser.add_argument('input', help='Path to input image file, zip file, or directory')
-    parser.add_argument('--border', type=int, default=5, help='Border size in pixels, default is 5')
-    parser.add_argument('--clean-input', action='store_true', help='Clean input directory before processing')
-    parser.add_argument('--open-errors', action='store_true', help='Open errors directory after processing')
-    parser.add_argument('--auto-second-pass', action='store_true', 
-                      help='Enable second pass processing for failed images')
+    parser = argparse.ArgumentParser(description='Process a zip file containing images.')
+    parser.add_argument('file_path', help='Path to the zip file or individual image')
+    parser.add_argument('--border', type=int, default=5, help='Size of border (in pixels) to add around detected cards. Default is 5.')
+    parser.add_argument('--clean', action='store_true', default=True, help='Clean input directory before extraction (default: True)')
+    parser.add_argument('--no-clean', dest='clean', action='store_false', help='Do not clean input directory before extraction')
+    parser.add_argument('--open-errors', action='store_true', default=False, help='Open errors directory after processing (default: False)')
+    parser.add_argument('--no-open-errors', dest='open_errors', action='store_false', help='Do not open errors directory after processing')
+    parser.add_argument('--single-image', action='store_true', help='Process a single image file instead of a zip')
     
     args = parser.parse_args()
     
-    # Process based on the input type
-    input_path = args.input
-    if os.path.isfile(input_path):
-        if input_path.lower().endswith('.zip'):
-            # Process zip file
-            process_zip_file(input_path, args.border, args.clean_input, args.open_errors, args.auto_second_pass)
-        elif any(input_path.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']):
-            # Process single image
-            output_dir = Path('output/final/single')
-            output_dir.mkdir(exist_ok=True, parents=True)
-            output_path = output_dir / os.path.basename(input_path)
+    # Check if input is a single image
+    if args.single_image or args.file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')):
+        print(f"Processing single image: {args.file_path}")
+        
+        # Create output directories
+        final_dir = Path("output") / "final" / "single"
+        debug_dir = Path("output") / "debug" / "single"
+        final_dir.mkdir(exist_ok=True, parents=True)
+        debug_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Process the image
+        output_path = final_dir / os.path.basename(args.file_path)
+        success, error_reason = crop_largest_object(args.file_path, output_path, args.border)
+        
+        if success:
+            print(f"Successfully processed {args.file_path}")
+            print(f"Output saved to {output_path}")
             
-            success, error_reason = crop_largest_object(input_path, output_path, args.border)
-            
-            if not success and args.auto_second_pass:
-                print(f"First pass failed: {error_reason}. Attempting second pass...")
-                errors_processing_dir = Path('output/errors/single/processing')
-                errors_processing_dir.mkdir(exist_ok=True, parents=True)
-                second_pass_output = errors_processing_dir / ("second_pass_" + os.path.basename(input_path))
-                success, error_reason = second_pass_processing(input_path, second_pass_output, args.border)
-                
-                if success:
-                    print("Second pass successful! Using improved result.")
-                    shutil.copy2(str(second_pass_output), str(output_path))
-            
-            # Verify the output
+            # Display the image for verification
             is_correct, error_category = display_image(output_path)
             
             if not is_correct:
-                # Create appropriate error directory
-                if error_category == "no_image":
-                    error_dir = Path('output/errors/single/no_image')
-                elif error_category == "cut_off":
-                    error_dir = Path('output/errors/single/cut_off')
-                elif error_category == "skewed":
-                    error_dir = Path('output/errors/single/skewed')
-                else:
-                    error_dir = Path('output/errors/single/other')
-                
-                error_dir.mkdir(exist_ok=True, parents=True)
-                error_path = error_dir / os.path.basename(input_path)
-                
-                # Copy the original image to the error directory
-                shutil.copy2(input_path, error_path)
-                print(f"Image marked as '{error_category}', saved to {error_path}")
-            else:
-                print(f"Image processed successfully: {output_path}")
-    
-    elif os.path.isdir(input_path):
-        # Process directory
-        print(f"Processing directory: {input_path}")
-        # Add directory processing logic here
+                print(f"Image verification failed: {error_category}")
+        else:
+            print(f"Failed to process {args.file_path}: {error_reason}")
+    else:
+        # Process as zip file
+        process_zip_file(args.file_path, args.border, args.clean, args.open_errors)
 
-# Call the main function if the script is run directly
 if __name__ == "__main__":
     main() 

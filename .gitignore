@@ -43,3 +43,6 @@ debug_output/
 
 # Logs
 *.log
+
+input
+output

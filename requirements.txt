@@ -1,6 +1,7 @@
-opencv-python>=4.8.0
-numpy>=1.24.0
+opencv-python>=4.5.0
+numpy>=1.19.0
 imutils>=0.5.4
 term-image>=0.7.2
-torch>=2.0.0
+torch>=1.9.0
+torchvision>=0.10.0
 ultralytics>=8.0.0 

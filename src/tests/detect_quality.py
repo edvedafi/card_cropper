@@ -88,18 +88,11 @@ def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=1
         if cropped_h < 50 or cropped_w < 50:
             return False
         
-        # Instead of template matching, let's use a different approach to detect cut-off cards
-        # We'll analyze the border pixels of the cropped image
-
-        # First check border pixels for consistency
         # Extract borders
         top_border = cropped_img[0:border_check_size, :]
         bottom_border = cropped_img[-border_check_size:, :]
         left_border = cropped_img[:, 0:border_check_size]
         right_border = cropped_img[:, -border_check_size:]
-        
-        # Calculate color statistics for each border
-        # A cut-off card would likely have inconsistent borders with the card content extending to the edge
         
         def calc_border_stats(border):
             # Convert to HSV for better color analysis
@@ -108,7 +101,7 @@ def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=1
             h_std = np.std(hsv_border[:,:,0])
             s_std = np.std(hsv_border[:,:,1])
             v_std = np.std(hsv_border[:,:,2])
-            # Higher std dev means more color variation (inconsistent border)
+            # Higher std dev means more color variation
             return (h_std, s_std, v_std)
         
         top_stats = calc_border_stats(top_border)
@@ -122,59 +115,55 @@ def is_card_cut_off(cropped_image_path, original_image_path, border_check_size=1
         left_std = np.mean(left_stats)
         right_std = np.mean(right_stats)
         
-        # Print border statistics
+        # Print border statistics for debugging
         print(f"Border std dev - Top: {top_std:.2f}, Bottom: {bottom_std:.2f}, Left: {left_std:.2f}, Right: {right_std:.2f}")
         
-        # Set thresholds for what constitutes a consistent border
-        # Lower std dev means more consistent color (likely background)
-        # Higher std dev means more variation (likely card content reaching the edge)
-        std_threshold = 25.0  # This may need adjustment based on testing
+        # More lenient threshold for sports cards that may have design elements at edges
+        std_threshold = 40.0  # Increased from 25.0
         
-        # Check if any border has high color variation (suggesting card content at the edge)
-        if (top_std > std_threshold or 
-            bottom_std > std_threshold or 
-            left_std > std_threshold or 
-            right_std > std_threshold):
-            
-            # Further verify with color continuity check
-            # For a border that seems to have high variation, check if it's similar to the 
-            # adjacent inner pixels (which would suggest content extends to the edge)
-            
-            # Get the adjacent inner pixels for each border
-            inner_top = cropped_img[border_check_size:border_check_size*2, :]
-            inner_bottom = cropped_img[-border_check_size*2:-border_check_size, :]
-            inner_left = cropped_img[:, border_check_size:border_check_size*2]
-            inner_right = cropped_img[:, -border_check_size*2:-border_check_size]
-            
-            # Compare border to inner pixels (using average color)
-            top_similarity = np.mean(np.abs(np.mean(top_border, axis=(0,1)) - np.mean(inner_top, axis=(0,1))))
-            bottom_similarity = np.mean(np.abs(np.mean(bottom_border, axis=(0,1)) - np.mean(inner_bottom, axis=(0,1))))
-            left_similarity = np.mean(np.abs(np.mean(left_border, axis=(0,1)) - np.mean(inner_left, axis=(0,1))))
-            right_similarity = np.mean(np.abs(np.mean(right_border, axis=(0,1)) - np.mean(inner_right, axis=(0,1))))
-            
-            print(f"Border-inner similarity - Top: {top_similarity:.2f}, Bottom: {bottom_similarity:.2f}, Left: {left_similarity:.2f}, Right: {right_similarity:.2f}")
-            
-            # If border is similar to adjacent inner pixels in color AND has high std dev,
-            # it likely means card content extends to the edge (cut off)
-            similarity_threshold = 20.0  # Lower value means more similar (adjust as needed)
-            
-            cutoff_borders = []
-            
-            if top_std > std_threshold and top_similarity < similarity_threshold:
-                cutoff_borders.append("top")
-            if bottom_std > std_threshold and bottom_similarity < similarity_threshold:
-                cutoff_borders.append("bottom")
-            if left_std > std_threshold and left_similarity < similarity_threshold:
-                cutoff_borders.append("left")
-            if right_std > std_threshold and right_similarity < similarity_threshold:
-                cutoff_borders.append("right")
-            
-            if cutoff_borders:
-                print(f"Card appears to be cut off at: {', '.join(cutoff_borders)}")
-                return True
+        # Count how many borders have high variation
+        high_variation_borders = sum([
+            top_std > std_threshold,
+            bottom_std > std_threshold,
+            left_std > std_threshold,
+            right_std > std_threshold
+        ])
         
-        # If we got here, the card likely has consistent borders (not cut off)
-        return False
+        # For sports cards, allow up to 2 borders to have high variation
+        # This accounts for design elements like team logos, player names, etc.
+        if high_variation_borders <= 2:
+            return False
+            
+        # If 3 or more borders have high variation, check if they're similar to inner pixels
+        # Get the adjacent inner pixels for each border
+        inner_top = cropped_img[border_check_size:border_check_size*2, :]
+        inner_bottom = cropped_img[-border_check_size*2:-border_check_size, :]
+        inner_left = cropped_img[:, border_check_size:border_check_size*2]
+        inner_right = cropped_img[:, -border_check_size*2:-border_check_size]
+        
+        # Compare border to inner pixels (using average color)
+        top_similarity = np.mean(np.abs(np.mean(top_border, axis=(0,1)) - np.mean(inner_top, axis=(0,1))))
+        bottom_similarity = np.mean(np.abs(np.mean(bottom_border, axis=(0,1)) - np.mean(inner_bottom, axis=(0,1))))
+        left_similarity = np.mean(np.abs(np.mean(left_border, axis=(0,1)) - np.mean(inner_left, axis=(0,1))))
+        right_similarity = np.mean(np.abs(np.mean(right_border, axis=(0,1)) - np.mean(inner_right, axis=(0,1))))
+        
+        print(f"Border-inner similarity - Top: {top_similarity:.2f}, Bottom: {bottom_similarity:.2f}, Left: {left_similarity:.2f}, Right: {right_similarity:.2f}")
+        
+        # More lenient similarity threshold for sports cards
+        similarity_threshold = 30.0  # Increased from 20.0
+        
+        # Only consider it cut off if 3 or more borders are both high variation and similar to inner content
+        cutoff_count = 0
+        if top_std > std_threshold and top_similarity < similarity_threshold:
+            cutoff_count += 1
+        if bottom_std > std_threshold and bottom_similarity < similarity_threshold:
+            cutoff_count += 1
+        if left_std > std_threshold and left_similarity < similarity_threshold:
+            cutoff_count += 1
+        if right_std > std_threshold and right_similarity < similarity_threshold:
+            cutoff_count += 1
+        
+        return cutoff_count >= 3
         
     except Exception as e:
         print(f"Error checking if card is cut off: {e}")
@@ -192,22 +181,23 @@ def detect_sports_card(image):
         bool: True if the image has characteristics of a sports card, False otherwise
     """
     try:
-        # 1. Check for horizontal lines (common in sports cards)
+        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # 1. Check for horizontal lines (common in sports cards)
         edges = cv2.Canny(gray, 50, 150)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, minLineLength=50, maxLineGap=10)
         
         horizontal_lines = 0
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
                 angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-                # Horizontal lines will have angles close to 0 or 180 degrees
-                if angle < 20 or angle > 160:
+                # More lenient angle threshold for horizontal lines
+                if angle < 30 or angle > 150:
                     horizontal_lines += 1
         
-        # 2. Check for text (common in sports cards)
-        # Simple check for potential text areas using gradient information
+        # 2. Check for text using gradient information
         sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         sobel_magnitude = np.sqrt(sobelx**2 + sobely**2)
@@ -221,8 +211,6 @@ def detect_sports_card(image):
         text_percentage = text_pixels / (gray.shape[0] * gray.shape[1])
         
         # 3. Check for defined borders/rectangles
-        # A sports card typically has a rectangular border
-        # Use contour detection to find rectangles
         contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         rectangular_contours = 0
@@ -235,21 +223,26 @@ def detect_sports_card(image):
             if len(approx) == 4:
                 rectangular_contours += 1
         
-        # Sports card criteria
-        has_horizontal_lines = horizontal_lines >= 3
-        has_text = text_percentage > 0.05  # At least 5% of the image should be potential text
-        has_rectangular_elements = rectangular_contours >= 2
+        # 4. Check for Bowman/Topps specific features
+        # Look for team logos and player info sections
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # Check for team colors (blue for Dodgers, etc)
+        team_color_mask = cv2.inRange(hsv, np.array([100, 50, 50]), np.array([130, 255, 255]))
+        team_color_pixels = cv2.countNonZero(team_color_mask)
+        team_color_percentage = team_color_pixels / (hsv.shape[0] * hsv.shape[1])
         
-        # Debug output
-        print(f"Sports card detection - Horizontal lines: {horizontal_lines}, Text percentage: {text_percentage:.2f}, Rectangular elements: {rectangular_contours}")
+        # Adjust criteria for sports cards
+        has_horizontal_lines = horizontal_lines >= 2  # Reduced from 3
+        has_text = text_percentage > 0.03  # Reduced from 0.05
+        has_rectangular_elements = rectangular_contours >= 1  # Reduced from 2
+        has_team_colors = team_color_percentage > 0.05
         
-        # If it meets at least 2 of the 3 criteria, it's likely a sports card
-        is_sports_card = sum([has_horizontal_lines, has_text, has_rectangular_elements]) >= 2
+        # Print debug information
+        print(f"Sports card detection - Horizontal lines: {horizontal_lines}, Text percentage: {text_percentage:.2f}, Rectangular elements: {rectangular_contours}, Team color percentage: {team_color_percentage:.2f}")
         
-        if is_sports_card:
-            print("Detected potential sports card with border")
-        
-        return is_sports_card
+        # Card passes if it meets at least 3 of the 4 criteria
+        criteria_met = sum([has_horizontal_lines, has_text, has_rectangular_elements, has_team_colors])
+        return criteria_met >= 3
         
     except Exception as e:
         print(f"Error in sports card detection: {e}")

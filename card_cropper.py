@@ -138,25 +138,50 @@ def open_directory(directory_path):
 def process_image(image_path, output_path, border_size=5):
     """
     Process a single image using all detection methods in sequence.
-    Returns True if any method succeeds, False otherwise.
+    Returns True if any method succeeds and passes quality check, False otherwise.
     """
+    print(f"\nProcessing image: {os.path.basename(image_path)}")
+    print("=" * 50)
+    
     # Try each detector in order of complexity
     detectors = [
         ('basic', detect_card_basic),
         ('enhanced', detect_card_enhanced),
-        ('ml', detect_card_ml),
+        #('ml', detect_card_ml)
         ('aggressive', detect_card_aggressive)
     ]
     
     for name, detector in detectors:
         print(f"\nTrying {name} detection...")
+        start_time = time.time()
         success, error = detector(image_path, output_path, border_size)
+        end_time = time.time()
+        duration = end_time - start_time
+        
         if success:
-            print(f"Successfully processed image using {name} detector")
-            return True
+            print(f"✓ {name} detection succeeded in {duration:.2f} seconds")
+            print(f"  Output saved to: {output_path}")
+            
+            # Verify the quality of the detected card
+            print("\nVerifying crop quality...")
+            is_valid, issues = check_crop_quality(image_path, output_path)
+            
+            if is_valid:
+                print("✓ Quality check passed")
+                print("\n" + "=" * 50)
+                return True
+            else:
+                print("✗ Quality check failed")
+                print("  Issues found:")
+                for issue in issues:
+                    print(f"    - {issue}")
+                print(f"\nTrying next detection method...")
         else:
-            print(f"{name} detection failed: {error}")
+            print(f"✗ {name} detection failed in {duration:.2f} seconds")
+            print(f"  Error: {error}")
     
+    print("\nAll detection methods failed or failed quality check")
+    print("=" * 50)
     return False
 
 def process_zip_file(zip_path, output_dir, border_size=5):

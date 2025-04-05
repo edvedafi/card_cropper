@@ -21,6 +21,7 @@ from src.detectors.basic_detector import detect_card as detect_card_basic
 from src.detectors.enhanced_detector import detect_card as detect_card_enhanced
 from src.detectors.ml_detector import detect_card as detect_card_ml
 from src.detectors.aggressive_detector import detect_card as detect_card_aggressive
+from src.detectors.rembg_detector import detect_card as detect_card_rembg
 
 print("Script started...")  # Debug print
 
@@ -145,9 +146,10 @@ def process_image(image_path, output_path, border_size=5):
     
     # Try each detector in order of complexity
     detectors = [
+        ('rembg', detect_card_rembg),  # Try rembg first as it's often reliable
+        ('ml', detect_card_ml),
         ('basic', detect_card_basic),
         ('enhanced', detect_card_enhanced),
-        #('ml', detect_card_ml)
         ('aggressive', detect_card_aggressive)
     ]
     
@@ -164,7 +166,7 @@ def process_image(image_path, output_path, border_size=5):
             
             # Verify the quality of the detected card
             print("\nVerifying crop quality...")
-            is_valid, issues = check_crop_quality(image_path, output_path)
+            is_valid, issues = check_crop_quality(image_path, output_path, interactive=True)
             
             if is_valid:
                 print("✓ Quality check passed")
@@ -227,7 +229,16 @@ def main():
     parser = argparse.ArgumentParser(description='Process images or zip files containing images.')
     parser.add_argument('input', help='Input image or zip file')
     parser.add_argument('--border', type=int, default=5, help='Border size in pixels (default: 5)')
+    parser.add_argument('--clean', action='store_true', help='Delete contents of debug and output directories before running')
     args = parser.parse_args()
+    
+    if args.clean:
+        # Clean debug and output directories
+        for dir_path in ['debug', 'output']:
+            if os.path.exists(dir_path):
+                print(f"Cleaning {dir_path} directory...")
+                shutil.rmtree(dir_path)
+                os.makedirs(dir_path)
     
     input_path = Path(args.input)
     output_dir = Path('output')

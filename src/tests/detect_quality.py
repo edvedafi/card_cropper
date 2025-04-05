@@ -3,6 +3,10 @@ import numpy as np
 import imutils
 from pathlib import Path
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def is_solid_color_image(image_path, threshold=50):
     """
@@ -248,7 +252,7 @@ def detect_sports_card(image):
         print(f"Error in sports card detection: {e}")
         return False
 
-def check_crop_quality(source_image_path, test_image_path):
+def check_crop_quality(source_image_path, test_image_path, interactive=False):
     """
     Check if the test image contains only the card from the source image and nothing more.
     
@@ -271,34 +275,195 @@ def check_crop_quality(source_image_path, test_image_path):
         return False, ["Could not read one or both images"]
     
     # 1. Check if test image is solid color (shouldn't be)
-    if is_solid_color_image(test_image_path):
+    is_solid = is_solid_color_image(test_image_path)
+    logging.info(f"Solid color check: {'FAILED' if is_solid else 'PASSED'}")
+    if is_solid:
         issues.append("Test image appears to be a solid color")
     
     # 2. Check if card is cut off
-    if is_card_cut_off(test_image_path, source_image_path):
+    is_cut_off = is_card_cut_off(test_image_path, source_image_path)
+    logging.info(f"Cut off check: {'FAILED' if is_cut_off else 'PASSED'}")
+    if is_cut_off:
         issues.append("Card appears to be cut off")
     
     # 3. Check if test image is larger than source image
     test_h, test_w = test_img.shape[:2]
     source_h, source_w = source_img.shape[:2]
-    if test_h > source_h or test_w > source_w:
+    is_too_large = test_h > source_h or test_w > source_w
+    logging.info(f"Size check: {'FAILED' if is_too_large else 'PASSED'} (test: {test_w}x{test_h}, source: {source_w}x{source_h})")
+    if is_too_large:
         issues.append("Test image is larger than source image")
     
     # 4. Check if test image has characteristics of a sports card
-    if not detect_sports_card(test_img):
+    is_sports_card = detect_sports_card(test_img)
+    logging.info(f"Sports card check: {'PASSED' if is_sports_card else 'FAILED'}")
+    if not is_sports_card:
         issues.append("Test image does not appear to be a valid sports card")
     
-    # 5. Check if test image is contained within source image
-    # Convert both images to grayscale for template matching
+    # 5. Check if the complete card exists in test image with proper alignment
+    # Convert images to grayscale for processing
     source_gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
     test_gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
     
-    # Try to find the test image in the source image
-    result = cv2.matchTemplate(source_gray, test_gray, cv2.TM_CCOEFF_NORMED)
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+    def find_card_edges(img, gray):
+        edges = cv2.Canny(gray, 100, 200)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+        edges = cv2.dilate(edges, kernel)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, None, None, None, None, None
+        card_contour = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(card_contour)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+        x, y, w, h = cv2.boundingRect(card_contour)
+        return card_contour, box, rect, x, y, w, h
     
-    # If the best match is too low, the test image might not be from the source
-    if max_val < 0.8:  # Threshold may need adjustment
-        issues.append("Test image does not appear to be from the source image")
+    # Find card in source image
+    source_result = find_card_edges(source_img, source_gray)
+    if source_result[0] is None:
+        issues.append("Could not detect card boundaries in source image")
+        return False, issues
+    source_card, source_box, source_rect, sx, sy, sw, sh = source_result
+        
+    # Find card in test image
+    test_result = find_card_edges(test_img, test_gray)
+    if test_result[0] is None:
+        issues.append("Could not detect card boundaries in test image")
+        return False, issues
+    test_card, test_box, test_rect, tx, ty, tw, th = test_result
+        
+    # Check for skew by comparing angles
+    source_angle = source_rect[-1]
+    test_angle = test_rect[-1]
+    angle_diff = abs(source_angle - test_angle) % 90
+    max_angle_diff = 2.0  # Maximum allowed angle difference in degrees
     
-    return len(issues) == 0, issues 
+    is_properly_aligned = angle_diff <= max_angle_diff
+    logging.info(f"Alignment check: {'PASSED' if is_properly_aligned else 'FAILED'} (angle difference: {angle_diff:.1f}°)")
+    
+    if not is_properly_aligned:
+        issues.append(f"Card is skewed by {angle_diff:.1f}°")
+        if not interactive:
+            return False, issues
+    
+    # Check margin balance
+    test_h, test_w = test_img.shape[:2]
+    left_margin = tx
+    right_margin = test_w - (tx + tw)
+    top_margin = ty
+    bottom_margin = test_h - (ty + th)
+    
+    # Calculate margin ratios (should be close to 1.0 for balanced margins)
+    lr_ratio = min(left_margin, right_margin) / max(left_margin, right_margin) if max(left_margin, right_margin) > 0 else 0
+    tb_ratio = min(top_margin, bottom_margin) / max(top_margin, bottom_margin) if max(top_margin, bottom_margin) > 0 else 0
+    
+    min_margin_ratio = 0.7  # Margins should be within 30% of each other
+    margins_balanced = lr_ratio >= min_margin_ratio and tb_ratio >= min_margin_ratio
+    
+    logging.info(f"Margin balance check: {'PASSED' if margins_balanced else 'FAILED'} ")
+    logging.info(f"  Left-Right ratio: {lr_ratio:.2f}, Top-Bottom ratio: {tb_ratio:.2f}")
+    
+    if not margins_balanced:
+        issues.append("Card margins are not balanced")
+        if not interactive:
+            return False, issues
+    
+    # Check if test image contains the complete card
+    # Use the source card contour to create a mask
+    test_mask = np.zeros(test_gray.shape, dtype=np.uint8)
+    cv2.drawContours(test_mask, [test_card], -1, 255, -1)
+    
+    # Calculate what percentage of the source card contour is present in the test image
+    card_area = cv2.contourArea(source_card)
+    test_card_area = cv2.contourArea(test_card)
+    
+    area_ratio = min(card_area, test_card_area) / max(card_area, test_card_area)
+    min_area_ratio = 0.95  # Cards should be very similar in size
+    
+    is_complete = area_ratio >= min_area_ratio
+    logging.info(f"Card completeness check: {'PASSED' if is_complete else 'FAILED'} (area ratio: {area_ratio:.3f})")
+    
+    if not is_complete:
+        issues.append("Test image does not contain the complete card")
+        if not interactive:
+            return False, issues
+    
+    # Check for non-background content outside the card area
+    # Create a mask for the non-card area
+    background_mask = np.ones(test_img.shape[:2], dtype=np.uint8) * 255
+    cv2.drawContours(background_mask, [test_card], -1, 0, -1)
+    
+    # Check the non-card area for non-background content
+    non_card_region = cv2.bitwise_and(test_img, test_img, mask=background_mask)
+    non_card_gray = cv2.cvtColor(non_card_region, cv2.COLOR_BGR2GRAY)
+    
+    # Calculate percentage of non-background pixels in the non-card area
+    _, outside_thresh = cv2.threshold(non_card_gray, 30, 255, cv2.THRESH_BINARY)
+    mask_area = np.count_nonzero(background_mask)
+    if mask_area > 0:  # Avoid division by zero
+        non_bg_ratio = np.count_nonzero(outside_thresh) / mask_area
+    else:
+        non_bg_ratio = 0
+    
+    background_threshold = 0.05  # Allow up to 5% non-background pixels
+    has_clean_background = non_bg_ratio <= background_threshold
+    
+    logging.info(f"Background check: {'PASSED' if has_clean_background else 'FAILED'} (non-background pixels: {non_bg_ratio:.1%})")
+    
+    if not has_clean_background:
+        issues.append("Test image contains non-background elements outside the card")
+        if not interactive:
+            return False, issues
+    
+    if interactive:
+        # Display quality check results
+        print("\nQuality Check Results:")
+        print("-" * 50)
+        if len(issues) == 0:
+            print("✅ All checks passed!")
+        else:
+            print("❌ Failed checks:")
+            for issue in issues:
+                print(f"  • {issue}")
+        print("-" * 50)
+        
+        # Display the test image in terminal using iTerm2 image protocol
+        try:
+            import base64
+            import os
+            
+            def iterm2_img_format(img_data, width='auto', height='auto'):
+                b64_data = base64.b64encode(img_data).decode('ascii')
+                return f'\033]1337;File=inline=1;size={len(img_data)};width={width};height={height}:{b64_data}\a'
+            
+            # Convert image to PNG bytes
+            img_rgb = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
+            success, img_data = cv2.imencode('.png', img_rgb)
+            if not success:
+                raise Exception("Failed to encode image")
+            
+            # Calculate dimensions to fit terminal
+            term_width = os.get_terminal_size().columns
+            img_width = test_img.shape[1]
+            scale = min(1.0, term_width / img_width)
+            
+            print("\nCard preview:")
+            if 'TERM_PROGRAM' in os.environ and os.environ['TERM_PROGRAM'] == 'iTerm.app':
+                print(iterm2_img_format(img_data.tobytes(), width=f'{scale * 100}%'))
+            else:
+                print("Image preview requires iTerm2 terminal")
+                print(f"Please open {output_path} in your image viewer")
+            
+            # Ask for user approval
+            while True:
+                response = input("\nApprove this card? (y/n): ").lower()
+                if response in ['y', 'n']:
+                    return response == 'y', issues
+                print("Please enter 'y' for yes or 'n' for no.")
+        except Exception as e:
+            print(f"Could not display image preview: {e}")
+            print(f"Please open {output_path} in your image viewer")
+            return len(issues) == 0, issues
+    
+    return len(issues) == 0, issues
